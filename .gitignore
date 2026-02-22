@@ -2,3 +2,10 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+/secret
+/secrets
+*.secret.*
+*.local.*
+/*SCRATCH*.md
+/*TASK*.md
+/*ROADMAP*.md
