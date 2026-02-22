@@ -21,6 +21,7 @@ impl std::fmt::Display for ModelCategory {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ModelInfo {
     pub id: String,
     pub display_name: String,

@@ -4,11 +4,13 @@ use super::VoiceDetector;
 
 /// Simple energy-based VAD that computes the RMS of audio samples
 /// and compares against a configurable threshold.
+#[allow(dead_code)]
 pub struct EnergyVad {
     threshold: f64,
 }
 
 impl EnergyVad {
+    #[allow(dead_code)]
     pub fn new(threshold: f64) -> Self {
         Self { threshold }
     }

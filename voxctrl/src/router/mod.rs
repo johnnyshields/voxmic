@@ -14,6 +14,7 @@ pub enum Intent {
     /// Type this text at the cursor.
     Dictate(String),
     /// Execute a named action with arguments.
+    #[allow(dead_code)]
     Command {
         action: String,
         args: serde_json::Value,

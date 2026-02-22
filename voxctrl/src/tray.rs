@@ -71,6 +71,7 @@ pub fn build_tray() -> Result<(TrayIcon, TrayMenuIds)> {
 }
 
 /// Update the tray icon color to reflect current status.
+#[allow(dead_code)]
 pub fn update_tray_icon(tray: &TrayIcon, status: AppStatus) -> Result<()> {
     tray.set_icon(Some(make_icon(status)))
         .context("set tray icon")?;

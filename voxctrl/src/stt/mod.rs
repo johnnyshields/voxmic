@@ -20,6 +20,7 @@ pub trait Transcriber: Send + Sync {
     /// Human-readable name for logs and UI.
     fn name(&self) -> &str;
     /// Check if the backend is reachable / functional.
+    #[allow(dead_code)]
     fn is_available(&self) -> bool;
 }
 

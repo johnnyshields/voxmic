@@ -8,6 +8,7 @@ pub mod silero;
 use crate::config::VadConfig;
 
 /// Trait for voice activity detection backends.
+#[allow(dead_code)]
 pub trait VoiceDetector: Send {
     /// Returns true if the audio chunk likely contains speech.
     fn is_speech(&mut self, samples: &[f32], sample_rate: u32) -> bool;
@@ -15,6 +16,7 @@ pub trait VoiceDetector: Send {
 }
 
 /// Create a VAD backend based on config.
+#[allow(dead_code)]
 pub fn create_vad(cfg: &VadConfig) -> anyhow::Result<Box<dyn VoiceDetector>> {
     match cfg.backend.as_str() {
         "energy" => {
@@ -35,6 +37,7 @@ pub fn create_vad(cfg: &VadConfig) -> anyhow::Result<Box<dyn VoiceDetector>> {
 }
 
 /// No-op VAD that considers everything as speech.
+#[allow(dead_code)]
 struct NullVad;
 impl VoiceDetector for NullVad {
     fn is_speech(&mut self, _samples: &[f32], _sample_rate: u32) -> bool {

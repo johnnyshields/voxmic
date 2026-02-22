@@ -3,11 +3,12 @@ pub mod cache_scanner;
 pub mod consent;
 pub mod downloader;
 
-pub use catalog::{ModelBackend, ModelCategory, ModelInfo};
+pub use catalog::ModelInfo;
 
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum DownloadStatus {
     NotDownloaded,
     Downloading { progress_pct: u8 },
@@ -61,6 +62,7 @@ impl ModelRegistry {
         }
     }
 
+    #[allow(dead_code)]
     pub fn entries(&self) -> &[ModelEntry] {
         &self.entries
     }

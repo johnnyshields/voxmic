@@ -62,6 +62,7 @@ struct App {
     cfg: config::Config,
     pipeline: Arc<pipeline::Pipeline>,
     _audio_stream: Option<cpal::Stream>,
+    #[allow(dead_code)]
     registry: Arc<Mutex<models::ModelRegistry>>,
     menu_ids: tray::TrayMenuIds,
 }
