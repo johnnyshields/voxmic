@@ -15,6 +15,8 @@ mod pipeline;
 mod recording;
 mod router;
 mod stt;
+mod stt_client;
+mod stt_server;
 #[cfg(feature = "gui")]
 mod tray;
 #[cfg(feature = "tui")]
@@ -232,6 +234,8 @@ fn main() -> Result<()> {
     let pipeline = Arc::new(pipeline::Pipeline::from_config(&cfg)?);
     let audio_stream = audio::start_capture(state.clone(), &cfg)?;
     log::info!("Audio stream open (always-on)");
+
+    stt_server::start(pipeline.clone(), cfg.stt.stt_server_port)?;
 
     match ui_mode {
         #[cfg(feature = "gui")]

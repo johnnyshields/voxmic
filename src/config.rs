@@ -19,6 +19,8 @@ pub struct SttConfig {
     pub whisper_compute_type: String,
     #[serde(default)]
     pub whisper_language: Option<String>,
+    #[serde(default = "default_stt_server_port")]
+    pub stt_server_port: u16,
 }
 
 impl Default for SttConfig {
@@ -30,6 +32,7 @@ impl Default for SttConfig {
             whisper_device: default_whisper_device(),
             whisper_compute_type: default_whisper_compute_type(),
             whisper_language: None,
+            stt_server_port: default_stt_server_port(),
         }
     }
 }
@@ -153,6 +156,7 @@ impl Default for Config {
 
 // ── Defaults ───────────────────────────────────────────────────────────────
 
+fn default_stt_server_port() -> u16 { 5201 }
 fn default_stt_backend() -> String { "voxtral-http".into() }
 fn default_voxtral_url() -> String { "http://127.0.0.1:5200".into() }
 fn default_whisper_model() -> String { "small".into() }
@@ -252,6 +256,7 @@ fn load_legacy_config(contents: &str) -> Config {
             whisper_device: flat.whisper_device,
             whisper_compute_type: flat.whisper_compute_type,
             whisper_language: flat.whisper_language,
+            stt_server_port: default_stt_server_port(),
         },
         vad: VadConfig {
             backend: default_vad_backend(),
@@ -292,6 +297,7 @@ mod tests {
     fn test_default_config() {
         let cfg = Config::default();
         assert_eq!(cfg.stt.backend, "voxtral-http");
+        assert_eq!(cfg.stt.stt_server_port, 5201);
         assert_eq!(cfg.vad.backend, "energy");
         assert_eq!(cfg.router.backend, "passthrough");
         assert_eq!(cfg.action.backend, "type-text");
