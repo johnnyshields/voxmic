@@ -94,9 +94,9 @@ pub fn all_models() -> Vec<ModelInfo> {
 
 /// Determine which model ID is required by the current config.
 pub fn required_model_id(cfg: &Config) -> Option<String> {
-    match cfg.backend.as_str() {
-        "whisper" => {
-            let model = cfg.whisper_model.as_str();
+    match cfg.stt.backend.as_str() {
+        "whisper-native" | "whisper-cpp" => {
+            let model = cfg.stt.whisper_model.as_str();
             match model {
                 "tiny" => Some("openai/whisper-tiny".into()),
                 "small" => Some("openai/whisper-small".into()),
@@ -108,7 +108,7 @@ pub fn required_model_id(cfg: &Config) -> Option<String> {
                 }
             }
         }
-        "voxtral" => Some("mistral/voxtral-mini".into()),
+        "voxtral-native" => Some("mistral/voxtral-mini".into()),
         _ => None,  // HTTP backends don't need local models
     }
 }
