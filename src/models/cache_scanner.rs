@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use crate::models::{DownloadStatus, ModelEntry};
 
 /// Scan the HuggingFace Hub cache to determine which models are already downloaded.
@@ -52,7 +53,7 @@ pub fn hf_cache_dir() -> Option<PathBuf> {
 }
 
 /// Find a snapshot directory and compute total file size.
-fn find_snapshot(snapshots_dir: &std::path::Path) -> Option<(PathBuf, u64)> {
+fn find_snapshot(snapshots_dir: &Path) -> Option<(PathBuf, u64)> {
     let read_dir = std::fs::read_dir(snapshots_dir).ok()?;
 
     for dir_entry in read_dir.flatten() {
@@ -67,8 +68,74 @@ fn find_snapshot(snapshots_dir: &std::path::Path) -> Option<(PathBuf, u64)> {
     None
 }
 
+/// Scan a user-chosen models directory using LM Studio-style layout: `publisher/model-name/`.
+///
+/// For each model entry with `hf_repo = "org/name"`, looks for `dir/org/name/`.
+/// Only updates entries that are still `NotDownloaded`.
+pub fn scan_models_directory(entries: &mut [ModelEntry], dir: &Path) {
+    if !dir.is_dir() {
+        log::debug!("Models directory {:?} does not exist", dir);
+        return;
+    }
+
+    for entry in entries.iter_mut() {
+        if !matches!(entry.status, DownloadStatus::NotDownloaded) {
+            continue;
+        }
+        if let Some(ref repo) = entry.info.hf_repo {
+            // repo is "org/name" — look for dir/org/name/
+            let model_dir = dir.join(repo);
+            if model_dir.is_dir() {
+                let size = dir_size(&model_dir);
+                if size > 0 {
+                    log::info!(
+                        "Found model '{}' in models directory at {:?} ({} bytes)",
+                        entry.info.id,
+                        model_dir,
+                        size,
+                    );
+                    entry.status = DownloadStatus::Downloaded {
+                        path: model_dir,
+                        size_bytes: size,
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// Apply per-model path overrides from config.
+///
+/// Each key in `paths` is a model ID, and the value is the local directory.
+/// Overrides any existing status (including Downloaded from other scanners).
+pub fn apply_model_paths(entries: &mut [ModelEntry], paths: &HashMap<String, PathBuf>) {
+    for entry in entries.iter_mut() {
+        if let Some(override_path) = paths.get(&entry.info.id) {
+            if override_path.is_dir() {
+                let size = dir_size(override_path);
+                log::info!(
+                    "Per-model override for '{}' at {:?} ({} bytes)",
+                    entry.info.id,
+                    override_path,
+                    size,
+                );
+                entry.status = DownloadStatus::Downloaded {
+                    path: override_path.clone(),
+                    size_bytes: size,
+                };
+            } else {
+                log::warn!(
+                    "Per-model override for '{}' points to non-existent directory {:?}",
+                    entry.info.id,
+                    override_path,
+                );
+            }
+        }
+    }
+}
+
 /// Recursively compute directory size in bytes.
-fn dir_size(path: &std::path::Path) -> u64 {
+fn dir_size(path: &Path) -> u64 {
     let mut total = 0;
     if let Ok(rd) = std::fs::read_dir(path) {
         for entry in rd.flatten() {
