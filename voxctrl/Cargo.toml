@@ -1,39 +1,67 @@
 [package]
 name = "voxctrl"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Cross-platform tray dictation app — hold Ctrl+Win to record, transcribe via Voxtral"
+description = "Pluggable voice-to-action pipeline — mic → VAD → STT → router → action"
+
+[features]
+default = ["stt-voxtral-http", "vad-energy"]
+
+# STT backends
+stt-voxtral-http   = ["dep:ureq"]
+stt-whisper-cpp    = ["dep:whisper-rs"]
+stt-whisper-native = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf-hub", "dep:tokenizers"]
+
+# VAD
+vad-energy = []
+vad-silero = ["dep:ort"]
+
+# Router
+router-llm = ["stt-voxtral-http"]
+
+# Action
+action-computer-use = []
+
+# GPU acceleration (opt-in, cross-cutting)
+cuda = []
 
 [dependencies]
-# Tray + menu + hotkey (Tauri ecosystem — designed to work together)
+# Core (always included)
+anyhow     = "1"
+log        = "0.4"
+env_logger = "0.11"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile   = "3"
+hound      = "3.5"
+
+# Tray + menu + hotkey (Tauri ecosystem)
 tray-icon     = "0.19"
 global-hotkey = "0.6"
 winit         = "0.30"
 muda          = "0.15"
 
 # Audio capture
-cpal  = "0.15"   # WASAPI (Win) / CoreAudio (Mac) / ALSA (Linux)
-hound = "3.5"    # WAV encode/decode
-
-# Voxtral backend
-ureq = { version = "2", features = ["json"] }
+cpal = "0.15"
 
 # Text injection
 enigo = "0.2"
 
-# Config
-serde      = { version = "1", features = ["derive"] }
-serde_json = "1"
+# STT: voxtral-http (optional, default)
+ureq = { version = "2", features = ["json"], optional = true }
 
-# Logging
-log    = "0.4"
-env_logger = "0.11"
+# STT: whisper-cpp (optional)
+whisper-rs = { version = "0.15", optional = true }
 
-# Temp files
-tempfile = "3"
+# STT: candle native (optional)
+candle-core         = { version = "0.8", optional = true }
+candle-nn           = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+hf-hub              = { version = "0.3", optional = true }
+tokenizers          = { version = "0.20", optional = true }
 
-# Error handling
-anyhow = "1"
+# VAD: silero (optional)
+ort = { version = "2.0.0-rc.9", optional = true }
 
 [package.metadata.wix]
 upgrade-guid = "EB4044A7-9711-4616-B3E0-8B8381C73C7B"
