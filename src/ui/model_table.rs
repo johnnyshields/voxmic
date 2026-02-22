@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 use crate::config;
 use crate::models::{DownloadStatus, ModelCategory, ModelRegistry};
-use crate::stt_client;
+use crate::models::catalog::ModelInfo;
 
 // ── Option tables for combo boxes ─────────────────────────────────────────
 
@@ -145,15 +145,8 @@ enum CaptureState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Settings,
-    Models,
     Test,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TestStatus {
-    Idle,
-    Recording,
-    Transcribing,
+    Models,
 }
 
 struct TestHotkeyState {
@@ -162,34 +155,77 @@ struct TestHotkeyState {
     pressed: bool,
 }
 
+struct TestState {
+    // Step 1: Mic test
+    mic_active: bool,
+    mic_level: f32,
+    mic_stream: Option<cpal::Stream>,
+    mic_level_rx: Option<std::sync::mpsc::Receiver<f32>>,
+
+    // Step 2: Hotkey test
+    hotkey_bypass: bool,
+    hotkey_detected: bool,
+
+    // Step 3: VAD test
+    vad_bypass: bool,
+    vad_detecting: bool,
+
+    // Step 4: STT test
+    stt_status: String,
+    stt_result: String,
+    stt_result_slot: Option<Arc<std::sync::Mutex<Option<String>>>>,
+    stt_status_slot: Option<Arc<std::sync::Mutex<Option<String>>>>,
+
+    // Shared audio buffer for recording
+    test_chunks: Arc<std::sync::Mutex<Vec<f32>>>,
+    recording: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for TestState {
+    fn default() -> Self {
+        Self {
+            mic_active: false,
+            mic_level: 0.0,
+            mic_stream: None,
+            mic_level_rx: None,
+            hotkey_bypass: false,
+            hotkey_detected: false,
+            vad_bypass: true,
+            vad_detecting: false,
+            stt_status: String::new(),
+            stt_result: String::new(),
+            stt_result_slot: None,
+            stt_status_slot: None,
+            test_chunks: Arc::new(std::sync::Mutex::new(Vec::new())),
+            recording: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
 pub struct SettingsApp {
     registry: Arc<Mutex<ModelRegistry>>,
     tab: Tab,
     prev_tab: Tab,
     model_tab: ModelCategory,
+    test: TestState,
     // Editable config fields
+    available_devices: Vec<String>,
+    selected_device: String,
     hotkey_shortcut: String,
     stt_backend: String,
     whisper_model: String,
     vad_backend: String,
+    hf_token: String,
+    show_hf_token: bool,
     models_directory: Option<PathBuf>,
     model_paths: HashMap<String, PathBuf>,
     saved_flash: Option<std::time::Instant>,
     // Hotkey capture
     capture_state: CaptureState,
     hotkey_include_super: bool,
-    // Test tab — hotkey test
+    // Test tab
     test_hotkey: Option<TestHotkeyState>,
     test_hotkey_error: Option<String>,
-    // Test tab — STT test
-    stt_server_port: u16,
-    test_status: TestStatus,
-    test_audio_chunks: Arc<Mutex<Vec<f32>>>,
-    test_audio_stream: Option<cpal::Stream>,
-    test_sample_rate: u32,
-    test_result_rx: Option<mpsc::Receiver<Result<String, String>>>,
-    test_transcript: String,
-    test_error: String,
 }
 
 // ── Subprocess launcher ───────────────────────────────────────────────────
@@ -241,10 +277,15 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
         tab: Tab::Settings,
         prev_tab: Tab::Settings,
         model_tab: ModelCategory::Stt,
+        test: TestState::default(),
+        available_devices: crate::audio::list_input_devices(),
+        selected_device: cfg.audio.device_pattern.clone(),
         hotkey_shortcut: cfg.hotkey.shortcut.clone(),
         stt_backend: cfg.stt.backend.clone(),
         whisper_model: cfg.stt.whisper_model.clone(),
         vad_backend: cfg.vad.backend.clone(),
+        hf_token: load_hf_token(),
+        show_hf_token: false,
         models_directory: cfg.models.models_directory.clone(),
         model_paths: cfg.models.model_paths.clone(),
         saved_flash: None,
@@ -252,19 +293,11 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
         hotkey_include_super: include_super,
         test_hotkey: None,
         test_hotkey_error: None,
-        stt_server_port: cfg.stt.stt_server_port,
-        test_status: TestStatus::Idle,
-        test_audio_chunks: Arc::new(Mutex::new(Vec::new())),
-        test_audio_stream: None,
-        test_sample_rate: 16000,
-        test_result_rx: None,
-        test_transcript: String::new(),
-        test_error: String::new(),
     };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([650.0, 400.0])
+            .with_inner_size([650.0, 520.0])
             .with_title("voxctrl — Settings"),
         ..Default::default()
     };
@@ -347,20 +380,22 @@ impl eframe::App for SettingsApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
-                ui.selectable_value(&mut self.tab, Tab::Models, "Models");
                 ui.selectable_value(&mut self.tab, Tab::Test, "Test");
+                ui.selectable_value(&mut self.tab, Tab::Models, "Models");
             });
             ui.separator();
 
             match self.tab {
                 Tab::Settings => self.draw_settings_tab(ui),
-                Tab::Models => self.draw_models_tab(ui),
                 Tab::Test => self.draw_test_tab(ui),
+                Tab::Models => self.draw_models_tab(ui),
             }
         });
 
         let repaint_ms =
-            if self.capture_state == CaptureState::Listening || self.tab == Tab::Test {
+            if self.capture_state == CaptureState::Listening
+                || self.tab == Tab::Test
+            {
                 50
             } else {
                 500
@@ -373,10 +408,34 @@ impl eframe::App for SettingsApp {
 
 impl SettingsApp {
     fn draw_settings_tab(&mut self, ui: &mut egui::Ui) {
+        // Build a temporary config to check which models are required
+        let required_stt = self.required_stt_model_id();
+        let required_vad = self.required_vad_model_id();
+        let stt_missing = required_stt.as_ref().map_or(false, |id| !self.is_model_downloaded(id));
+        let vad_missing = required_vad.as_ref().map_or(false, |id| !self.is_model_downloaded(id));
+
         egui::Grid::new("settings_grid")
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
+                ui.label("Mic Input");
+                egui::ComboBox::from_id_salt("mic_input")
+                    .selected_text(if self.selected_device.is_empty() {
+                        "Default"
+                    } else {
+                        &self.selected_device
+                    })
+                    .show_ui(ui, |ui| {
+                        for name in &self.available_devices {
+                            ui.selectable_value(
+                                &mut self.selected_device,
+                                name.clone(),
+                                name.as_str(),
+                            );
+                        }
+                    });
+                ui.end_row();
+
                 // ── Hotkey capture widget ─────────────────────────────
                 ui.label("Hotkey");
                 ui.horizontal(|ui| match self.capture_state {
@@ -416,13 +475,18 @@ impl SettingsApp {
 
                 // ── STT backend ───────────────────────────────────────
                 ui.label("STT Backend");
-                egui::ComboBox::from_id_salt("stt_backend")
-                    .selected_text(lookup_label(STT_BACKENDS, &self.stt_backend))
-                    .show_ui(ui, |ui| {
-                        for &(value, label) in STT_BACKENDS {
-                            ui.selectable_value(&mut self.stt_backend, value.into(), label);
-                        }
-                    });
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("stt_backend")
+                        .selected_text(lookup_label(STT_BACKENDS, &self.stt_backend))
+                        .show_ui(ui, |ui| {
+                            for &(value, label) in STT_BACKENDS {
+                                ui.selectable_value(&mut self.stt_backend, value.into(), label);
+                            }
+                        });
+                    if stt_missing {
+                        ui.colored_label(egui::Color32::RED, "model not downloaded");
+                    }
+                });
                 ui.end_row();
 
                 if self.stt_backend.starts_with("whisper") {
@@ -443,13 +507,30 @@ impl SettingsApp {
 
                 // ── VAD backend ───────────────────────────────────────
                 ui.label("VAD Backend");
-                egui::ComboBox::from_id_salt("vad_backend")
-                    .selected_text(lookup_label(VAD_BACKENDS, &self.vad_backend))
-                    .show_ui(ui, |ui| {
-                        for &(value, label) in VAD_BACKENDS {
-                            ui.selectable_value(&mut self.vad_backend, value.into(), label);
-                        }
-                    });
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("vad_backend")
+                        .selected_text(lookup_label(VAD_BACKENDS, &self.vad_backend))
+                        .show_ui(ui, |ui| {
+                            for &(value, label) in VAD_BACKENDS {
+                                ui.selectable_value(&mut self.vad_backend, value.into(), label);
+                            }
+                        });
+                    if vad_missing {
+                        ui.colored_label(egui::Color32::RED, "model not downloaded");
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Hugging Face Token");
+                ui.horizontal(|ui| {
+                    let field = egui::TextEdit::singleline(&mut self.hf_token)
+                        .password(!self.show_hf_token)
+                        .desired_width(200.0);
+                    ui.add(field);
+                    if ui.selectable_label(self.show_hf_token, "Show").clicked() {
+                        self.show_hf_token = !self.show_hf_token;
+                    }
+                });
                 ui.end_row();
 
                 ui.label("Models Directory");
@@ -479,11 +560,39 @@ impl SettingsApp {
 
         if let Some(t) = self.saved_flash {
             if t.elapsed() < std::time::Duration::from_secs(3) {
-                ui.colored_label(egui::Color32::GREEN, "Saved! Restart voxctrl to apply.");
+                ui.colored_label(egui::Color32::GREEN, "Saved!");
             } else {
                 self.saved_flash = None;
             }
         }
+    }
+
+    fn required_stt_model_id(&self) -> Option<String> {
+        match self.stt_backend.as_str() {
+            "whisper-native" | "whisper-cpp" => match self.whisper_model.as_str() {
+                "tiny" => Some("openai/whisper-tiny".into()),
+                "small" => Some("openai/whisper-small".into()),
+                "medium" => Some("openai/whisper-medium".into()),
+                "large-v3" | "large" => Some("openai/whisper-large-v3".into()),
+                _ => None,
+            },
+            "voxtral-native" => Some("mistral/voxtral-mini".into()),
+            _ => None,
+        }
+    }
+
+    fn required_vad_model_id(&self) -> Option<String> {
+        match self.vad_backend.as_str() {
+            "silero" => Some("silero/vad-v5".into()),
+            _ => None,
+        }
+    }
+
+    fn is_model_downloaded(&self, model_id: &str) -> bool {
+        let registry = self.registry.lock().unwrap();
+        registry.get(model_id).map_or(false, |e| {
+            matches!(e.status, DownloadStatus::Downloaded { .. })
+        })
     }
 
     /// Toggle "Super" in the current shortcut string when the checkbox changes.
@@ -517,6 +626,7 @@ impl SettingsApp {
 
     fn save_config(&mut self) {
         let mut cfg = config::load_config();
+        cfg.audio.device_pattern = self.selected_device.clone();
         cfg.hotkey.shortcut = self.hotkey_shortcut.clone();
         cfg.stt.backend = self.stt_backend.clone();
         cfg.stt.whisper_model = self.whisper_model.clone();
@@ -524,6 +634,11 @@ impl SettingsApp {
         cfg.models.models_directory = self.models_directory.clone();
         cfg.models.model_paths = self.model_paths.clone();
         config::save_config(&cfg);
+        save_hf_token(&self.hf_token);
+        // Rescan cache with updated model config
+        let mut reg = self.registry.lock().unwrap();
+        reg.scan_cache(&cfg.models);
+        drop(reg);
         self.saved_flash = Some(std::time::Instant::now());
         log::info!("Config saved");
     }
@@ -533,101 +648,258 @@ impl SettingsApp {
 
 impl SettingsApp {
     fn draw_test_tab(&mut self, ui: &mut egui::Ui) {
-        // ── Hotkey test section ───────────────────────────────────────
-        ui.heading("Hotkey Test");
+        // Poll async STT result from background thread
+        if let Some(ref slot) = self.test.stt_status_slot {
+            if let Some(status) = slot.lock().unwrap().take() {
+                self.test.stt_status = status;
+            }
+        }
+        let stt_done = self.test.stt_result_slot.as_ref()
+            .and_then(|slot| slot.lock().unwrap().take());
+        if let Some(result) = stt_done {
+            self.test.stt_result = result;
+            self.test.stt_result_slot = None;
+            self.test.stt_status_slot = None;
+        }
 
-        if self.hotkey_shortcut.is_empty() {
-            ui.label("No hotkey configured. Set one in the Settings tab first.");
-        } else {
-            ui.label(format!("Hotkey: {}", self.hotkey_shortcut));
-            ui.add_space(4.0);
+        // Drain mic level readings
+        if let Some(rx) = &self.test.mic_level_rx {
+            while let Ok(level) = rx.try_recv() {
+                self.test.mic_level = level;
+            }
+        }
+        if !self.test.mic_active {
+            self.test.mic_level *= 0.9;
+        }
 
-            if let Some(ref error) = self.test_hotkey_error {
+        let cfg = config::load_config();
+
+        ui.heading("Pipeline Test");
+        ui.label("Test each stage of the audio pipeline.");
+        ui.add_space(8.0);
+
+        // ── Step 1: Mic Test ──
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong("1. Microphone");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.test.mic_active {
+                        if ui.button("Stop").clicked() {
+                            self.test.mic_stream = None;
+                            self.test.mic_level_rx = None;
+                            self.test.mic_active = false;
+                            self.test.mic_level = 0.0;
+                        }
+                    } else if ui.button("Start").clicked() {
+                        self.start_mic_test(&cfg);
+                    }
+                });
+            });
+            // Volume meter bar
+            let level = (self.test.mic_level * 10.0).clamp(0.0, 1.0);
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), 14.0),
+                egui::Sense::hover(),
+            );
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+            let filled = egui::Rect::from_min_size(
+                rect.min,
+                egui::vec2(rect.width() * level, rect.height()),
+            );
+            let color = if level > 0.7 {
+                egui::Color32::RED
+            } else if level > 0.3 {
+                egui::Color32::YELLOW
+            } else {
+                egui::Color32::GREEN
+            };
+            painter.rect_filled(filled, 2.0, color);
+            if self.test.mic_active {
+                ui.label("Speak to see levels");
+            } else {
+                ui.label("Click Start to test microphone");
+            }
+        });
+
+        ui.add_space(4.0);
+
+        // ── Step 2: Hotkey Test (live detection) ──
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong("2. Hotkey");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.checkbox(&mut self.test.hotkey_bypass, "Bypass");
+                });
+            });
+            if self.test.hotkey_bypass {
+                ui.colored_label(egui::Color32::YELLOW, "Bypassed — hotkey step skipped");
+                self.test.hotkey_detected = true;
+            } else if self.hotkey_shortcut.is_empty() {
+                ui.label("No hotkey configured. Set one in the Settings tab.");
+            } else if let Some(ref error) = self.test_hotkey_error {
                 ui.colored_label(egui::Color32::RED, error);
-                ui.add_space(4.0);
-                if ui.button("Retry").clicked() {
+                if ui.small_button("Retry").clicked() {
                     self.test_hotkey_error = None;
                     self.register_test_hotkey();
                 }
             } else if let Some(ref state) = self.test_hotkey {
                 let (color, label) = if state.pressed {
-                    (egui::Color32::GREEN, "ACTIVE")
+                    self.test.hotkey_detected = true;
+                    (egui::Color32::GREEN, "ACTIVE — hotkey detected!")
                 } else {
-                    (egui::Color32::YELLOW, "Ready")
+                    (egui::Color32::YELLOW, "Ready — press your hotkey...")
                 };
-
                 ui.horizontal(|ui| {
-                    let radius = 10.0;
+                    let radius = 8.0;
                     let (rect, _) = ui.allocate_exact_size(
                         egui::vec2(radius * 2.0, radius * 2.0),
                         egui::Sense::hover(),
                     );
-                    ui.painter()
-                        .circle_filled(rect.center(), radius, color);
-                    ui.label(egui::RichText::new(label).color(color).size(18.0));
+                    ui.painter().circle_filled(rect.center(), radius, color);
+                    ui.label(egui::RichText::new(label).color(color));
                 });
+            } else {
+                ui.label("Registering hotkey...");
             }
-        }
+        });
 
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(8.0);
+        ui.add_space(4.0);
 
-        // ── STT test section ─────────────────────────────────────────
-        ui.heading("STT Test");
-        ui.label("Record audio and transcribe via the main voxctrl process.");
-        ui.add_space(8.0);
-
-        // Poll for transcription result
-        if self.test_status == TestStatus::Transcribing {
-            if let Some(rx) = &self.test_result_rx {
-                if let Ok(result) = rx.try_recv() {
-                    match result {
-                        Ok(text) => {
-                            self.test_transcript = text;
-                            self.test_error.clear();
-                        }
-                        Err(e) => {
-                            self.test_error = e;
-                            self.test_transcript.clear();
-                        }
-                    }
-                    self.test_status = TestStatus::Idle;
-                    self.test_result_rx = None;
-                }
-            }
-        }
-
-        match self.test_status {
-            TestStatus::Idle => {
-                if ui.button("  Record  ").clicked() {
-                    self.start_recording();
-                }
-            }
-            TestStatus::Recording => {
-                if ui.button("  Stop & Transcribe  ").clicked() {
-                    self.stop_and_transcribe();
-                }
-                ui.colored_label(egui::Color32::RED, "Recording...");
-            }
-            TestStatus::Transcribing => {
-                ui.add_enabled(false, egui::Button::new("  Transcribing...  "));
-                ui.spinner();
-            }
-        }
-
-        ui.add_space(12.0);
-
-        if !self.test_transcript.is_empty() {
-            ui.group(|ui| {
-                ui.label("Transcript:");
-                ui.monospace(&self.test_transcript);
+        // ── Step 3: VAD Test ──
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong("3. Voice Activity Detection");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.checkbox(&mut self.test.vad_bypass, "Bypass (always on)");
+                });
             });
+            if self.test.vad_bypass {
+                ui.colored_label(egui::Color32::YELLOW, "Bypassed — all audio treated as speech");
+            } else {
+                ui.label(format!("Backend: {}", cfg.vad.backend));
+                if self.test.mic_active {
+                    if self.test.mic_level > 0.03 {
+                        self.test.vad_detecting = true;
+                        ui.colored_label(egui::Color32::GREEN, "Speech detected");
+                    } else {
+                        self.test.vad_detecting = false;
+                        ui.label("Silence");
+                    }
+                } else {
+                    ui.label("Start mic test first");
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+
+        // ── Step 4: STT Test ──
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong("4. Speech-to-Text");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let is_recording = self.test.recording.load(std::sync::atomic::Ordering::Relaxed);
+                    if is_recording {
+                        if ui.button("Stop & Transcribe").clicked() {
+                            self.stop_recording_and_transcribe(&cfg);
+                        }
+                    } else if self.test.stt_status == "Transcribing..." {
+                        ui.add_enabled(false, egui::Button::new("Transcribing..."));
+                    } else if ui.button("Record").clicked() {
+                        self.start_test_recording(&cfg);
+                    }
+                });
+            });
+            ui.label(format!("Backend: {}", cfg.stt.backend));
+            if !self.test.stt_status.is_empty() {
+                ui.label(&self.test.stt_status);
+            }
+            if !self.test.stt_result.is_empty() {
+                ui.separator();
+                ui.monospace(&self.test.stt_result);
+            }
+        });
+
+        ui.add_space(4.0);
+
+        // ── Step 5: Final Output ──
+        ui.group(|ui| {
+            ui.strong("5. Output");
+            if !self.test.stt_result.is_empty() {
+                ui.label("Transcription result:");
+                ui.monospace(&self.test.stt_result);
+                ui.colored_label(egui::Color32::GREEN, "Pipeline test complete!");
+            } else {
+                ui.label("Complete steps above to see final output");
+            }
+        });
+    }
+
+    fn start_mic_test(&mut self, cfg: &config::Config) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        match crate::audio::start_test_capture(
+            &cfg.audio.device_pattern,
+            cfg.audio.sample_rate,
+            tx,
+            Arc::clone(&self.test.test_chunks),
+            Arc::clone(&self.test.recording),
+        ) {
+            Ok(stream) => {
+                self.test.mic_stream = Some(stream);
+                self.test.mic_level_rx = Some(rx);
+                self.test.mic_active = true;
+            }
+            Err(e) => {
+                log::error!("Failed to start mic test: {e}");
+                self.test.stt_status = format!("Mic error: {e}");
+            }
+        }
+    }
+
+    fn start_test_recording(&mut self, cfg: &config::Config) {
+        if !self.test.mic_active {
+            self.start_mic_test(cfg);
+        }
+        self.test.test_chunks.lock().unwrap().clear();
+        self.test.recording.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.test.stt_status = "Recording...".into();
+        self.test.stt_result.clear();
+    }
+
+    fn stop_recording_and_transcribe(&mut self, cfg: &config::Config) {
+        self.test.recording.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.test.stt_status = "Transcribing...".into();
+
+        let chunks: Vec<f32> = self.test.test_chunks.lock().unwrap().drain(..).collect();
+        if chunks.is_empty() {
+            self.test.stt_status = "No audio recorded".into();
+            return;
         }
 
-        if !self.test_error.is_empty() {
-            ui.colored_label(egui::Color32::RED, &self.test_error);
-        }
+        let sample_rate = cfg.audio.sample_rate;
+        let stt_cfg = cfg.stt.clone();
+
+        let result_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let status_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let result_writer = Arc::clone(&result_slot);
+        let status_writer = Arc::clone(&status_slot);
+
+        self.test.stt_result_slot = Some(result_slot);
+        self.test.stt_status_slot = Some(status_slot);
+
+        std::thread::spawn(move || {
+            match transcribe_chunks(&chunks, sample_rate, &stt_cfg) {
+                Ok(text) => {
+                    *result_writer.lock().unwrap() = Some(text);
+                    *status_writer.lock().unwrap() = Some("Done".into());
+                }
+                Err(e) => {
+                    *result_writer.lock().unwrap() = Some(String::new());
+                    *status_writer.lock().unwrap() = Some(format!("STT error: {e}"));
+                }
+            }
+        });
     }
 
     fn register_test_hotkey(&mut self) {
@@ -673,122 +945,33 @@ impl SettingsApp {
         self.test_hotkey = None;
         self.test_hotkey_error = None;
     }
-
-    fn start_recording(&mut self) {
-        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-
-        self.test_transcript.clear();
-        self.test_error.clear();
-
-        let host = cpal::default_host();
-        let device = match host.default_input_device() {
-            Some(d) => d,
-            None => {
-                self.test_error = "No audio input device found".into();
-                return;
-            }
-        };
-
-        let default_config = match device.default_input_config() {
-            Ok(c) => c,
-            Err(e) => {
-                self.test_error = format!("Cannot query audio config: {e}");
-                return;
-            }
-        };
-
-        let sample_rate = default_config.sample_rate().0;
-        self.test_sample_rate = sample_rate;
-
-        let config = cpal::StreamConfig {
-            channels: 1,
-            sample_rate: cpal::SampleRate(sample_rate),
-            buffer_size: cpal::BufferSize::Default,
-        };
-
-        let chunks = self.test_audio_chunks.clone();
-        chunks.lock().unwrap().clear();
-
-        let stream = match device.build_input_stream(
-            &config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let mut buf = chunks.lock().unwrap();
-                buf.extend_from_slice(data);
-            },
-            |err| log::error!("Test audio capture error: {err}"),
-            None,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                self.test_error = format!("Failed to open audio stream: {e}");
-                return;
-            }
-        };
-
-        if let Err(e) = stream.play() {
-            self.test_error = format!("Failed to start audio stream: {e}");
-            return;
-        }
-
-        self.test_audio_stream = Some(stream);
-        self.test_status = TestStatus::Recording;
-    }
-
-    fn stop_and_transcribe(&mut self) {
-        // Drop the stream to stop recording
-        self.test_audio_stream = None;
-
-        let samples: Vec<f32> = {
-            let mut buf = self.test_audio_chunks.lock().unwrap();
-            std::mem::take(&mut *buf)
-        };
-
-        if samples.is_empty() {
-            self.test_error = "No audio captured".into();
-            self.test_status = TestStatus::Idle;
-            return;
-        }
-
-        let sample_rate = self.test_sample_rate;
-        let wav_data = match encode_wav(&samples, sample_rate) {
-            Ok(data) => data,
-            Err(e) => {
-                self.test_error = format!("Failed to encode WAV: {e}");
-                self.test_status = TestStatus::Idle;
-                return;
-            }
-        };
-
-        let port = self.stt_server_port;
-        let (tx, rx) = mpsc::channel();
-
-        std::thread::spawn(move || {
-            let result = stt_client::transcribe_via_server(port, &wav_data)
-                .map_err(|e| format!("{e:#}"));
-            let _ = tx.send(result);
-        });
-
-        self.test_result_rx = Some(rx);
-        self.test_status = TestStatus::Transcribing;
-    }
 }
 
-fn encode_wav(samples: &[f32], sample_rate: u32) -> anyhow::Result<Vec<u8>> {
-    let mut cursor = std::io::Cursor::new(Vec::new());
+fn transcribe_chunks(
+    chunks: &[f32],
+    sample_rate: u32,
+    stt_cfg: &config::SttConfig,
+) -> anyhow::Result<String> {
+    let tmp = tempfile::Builder::new()
+        .suffix(".wav")
+        .tempfile()?;
+
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate,
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let mut writer = hound::WavWriter::new(&mut cursor, spec)?;
-    for &s in samples {
-        let clamped = s.clamp(-1.0, 1.0);
-        let sample_i16 = (clamped * i16::MAX as f32) as i16;
-        writer.write_sample(sample_i16)?;
+
+    let mut writer = hound::WavWriter::create(tmp.path(), spec)?;
+    for &sample in chunks {
+        let s16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+        writer.write_sample(s16)?;
     }
     writer.finalize()?;
-    Ok(cursor.into_inner())
+
+    let transcriber = crate::stt::create_transcriber(stt_cfg, None)?;
+    transcriber.transcribe(tmp.path())
 }
 
 // ── Models tab ────────────────────────────────────────────────────────────
@@ -844,6 +1027,7 @@ impl SettingsApp {
 
         // Collect deferred actions (folder picker must happen outside grid)
         let mut browse_model_id: Option<String> = None;
+        let mut pending_action: Option<Action> = None;
 
         // Table
         egui::Grid::new("model_table")
@@ -888,30 +1072,24 @@ impl SettingsApp {
                     }
 
                     // Action column
-                    let _action = match &entry.status {
+                    match &entry.status {
                         DownloadStatus::NotDownloaded | DownloadStatus::Error(_) => {
                             if ui.button("Download").clicked() {
-                                Some(Action::Download(entry.id.clone()))
-                            } else {
-                                None
+                                pending_action = Some(Action::Download(entry.id.clone()));
                             }
                         }
                         DownloadStatus::Downloaded { .. } if entry.in_use => {
                             ui.add_enabled(false, egui::Button::new("In Use"));
-                            None
                         }
                         DownloadStatus::Downloaded { .. } => {
                             if ui.button("Delete").clicked() {
-                                Some(Action::Delete(entry.id.clone()))
-                            } else {
-                                None
+                                pending_action = Some(Action::Delete(entry.id.clone()));
                             }
                         }
                         DownloadStatus::Downloading { .. } => {
                             ui.add_enabled(false, egui::Button::new("..."));
-                            None
                         }
-                    };
+                    }
 
                     // Local Path column
                     ui.horizontal(|ui| {
@@ -954,6 +1132,22 @@ impl SettingsApp {
         if total_bytes > 0 {
             ui.label(format!("Total disk usage: {}", format_size(total_bytes)));
         }
+
+        // Process action outside the lock
+        if let Some(action) = pending_action {
+            match action {
+                Action::Download(model_id) => {
+                    let info = {
+                        let reg = self.registry.lock().unwrap();
+                        reg.get(&model_id).map(|e| e.info.clone())
+                    };
+                    if let Some(info) = info {
+                        spawn_download(info, Arc::clone(&self.registry));
+                    }
+                }
+                Action::Delete(model_id) => do_delete(&model_id, &self.registry),
+            }
+        }
     }
 }
 
@@ -968,10 +1162,202 @@ struct ModelRowSnapshot {
     in_use: bool,
 }
 
-#[allow(dead_code)]
 enum Action {
     Download(String),
     Delete(String),
+}
+
+/// Spawn a background thread to download a model's files from HuggingFace.
+fn spawn_download(info: ModelInfo, registry: Arc<Mutex<ModelRegistry>>) {
+    let repo = match &info.hf_repo {
+        Some(r) => r.clone(),
+        None => {
+            log::error!("Model '{}' has no HuggingFace repo configured", info.id);
+            if let Some(entry) = registry.lock().unwrap().get_mut(&info.id) {
+                entry.status = DownloadStatus::Error("No HF repo configured".into());
+            }
+            return;
+        }
+    };
+
+    // Mark as downloading 0%
+    if let Some(entry) = registry.lock().unwrap().get_mut(&info.id) {
+        entry.status = DownloadStatus::Downloading { progress_pct: 0 };
+    }
+
+    std::thread::spawn(move || {
+        if let Err(e) = download_model_files(&info, &repo, &registry) {
+            log::error!("Download failed for '{}': {e}", info.id);
+            if let Some(entry) = registry.lock().unwrap().get_mut(&info.id) {
+                entry.status = DownloadStatus::Error(format!("{e}"));
+            }
+            return;
+        }
+
+        // Rescan cache so the entry picks up the downloaded path + size
+        let cfg = config::load_config();
+        let mut reg = registry.lock().unwrap();
+        reg.scan_cache(&cfg.models);
+        log::info!("Download complete for '{}'", info.id);
+    });
+}
+
+/// Path to the HuggingFace token file.
+fn hf_token_path() -> Option<std::path::PathBuf> {
+    dirs::cache_dir().map(|d| d.join("huggingface").join("token"))
+}
+
+/// Load the HF token for the Settings UI field.
+fn load_hf_token() -> String {
+    hf_token().unwrap_or_default()
+}
+
+/// Save the HF token to `~/.cache/huggingface/token`.
+fn save_hf_token(token: &str) {
+    let path = match hf_token_path() {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if token.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else if let Err(e) = std::fs::write(&path, token.trim()) {
+        log::error!("Failed to write HF token to {}: {e}", path.display());
+    }
+}
+
+/// Read the HuggingFace API token from `HF_TOKEN` env var or `~/.cache/huggingface/token`.
+fn hf_token() -> Option<String> {
+    if let Ok(tok) = std::env::var("HF_TOKEN") {
+        if !tok.is_empty() {
+            return Some(tok);
+        }
+    }
+    // Also check legacy env var
+    if let Ok(tok) = std::env::var("HUGGING_FACE_HUB_TOKEN") {
+        if !tok.is_empty() {
+            return Some(tok);
+        }
+    }
+    // Read from token file
+    let token_path = dirs::cache_dir()?.join("huggingface").join("token");
+    std::fs::read_to_string(token_path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Download all files for a model from HuggingFace Hub.
+fn download_model_files(
+    info: &ModelInfo,
+    repo: &str,
+    registry: &Arc<Mutex<ModelRegistry>>,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let token = hf_token();
+
+    let cache_dir = crate::models::cache_scanner::effective_cache_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine HF cache directory"))?;
+
+    // HF Hub cache layout: models--{org}--{name}/snapshots/main/
+    let model_dir_name = format!("models--{}", repo.replace('/', "--"));
+    let snapshot_dir = cache_dir.join(&model_dir_name).join("snapshots").join("main");
+    std::fs::create_dir_all(&snapshot_dir)?;
+
+    let files = &info.hf_files;
+    if files.is_empty() {
+        anyhow::bail!("No files listed for model '{}'", info.id);
+    }
+
+    for (i, filename) in files.iter().enumerate() {
+        let url = format!(
+            "https://huggingface.co/{}/resolve/main/{}",
+            repo, filename
+        );
+        log::info!("Downloading {} ({}/{})", url, i + 1, files.len());
+
+        let mut req = ureq::get(&url);
+        if let Some(ref tok) = token {
+            req = req.set("Authorization", &format!("Bearer {tok}"));
+        }
+        let resp = req.call().map_err(|e| {
+            let hint = if token.is_none() {
+                " (no HF token found — set HF_TOKEN env var or run `huggingface-cli login`)"
+            } else {
+                ""
+            };
+            anyhow::anyhow!("HTTP request failed for {filename}: {e}{hint}")
+        })?;
+
+        let dest = snapshot_dir.join(filename);
+
+        // Create parent dirs for nested files (e.g. "subdir/file.bin")
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut out = std::fs::File::create(&dest)?;
+        let mut reader = resp.into_reader();
+        std::io::copy(&mut reader, &mut out)?;
+        out.flush()?;
+
+        // Update progress
+        let pct = ((i + 1) as f32 / files.len() as f32 * 100.0) as u8;
+        if let Some(entry) = registry.lock().unwrap().get_mut(&info.id) {
+            entry.status = DownloadStatus::Downloading { progress_pct: pct };
+        }
+    }
+
+    Ok(())
+}
+
+/// Delete a model's HF cache directory and rescan.
+fn do_delete(model_id: &str, registry: &Arc<Mutex<ModelRegistry>>) {
+    let hf_repo = {
+        let reg = registry.lock().unwrap();
+        reg.get(model_id).and_then(|e| e.info.hf_repo.clone())
+    };
+
+    let repo = match hf_repo {
+        Some(r) => r,
+        None => {
+            log::error!("Cannot delete '{}': no HF repo configured", model_id);
+            return;
+        }
+    };
+
+    let cache_dir = match crate::models::cache_scanner::effective_cache_dir() {
+        Some(d) => d,
+        None => {
+            log::error!("Cannot determine HF cache directory");
+            return;
+        }
+    };
+
+    let model_dir_name = format!("models--{}", repo.replace('/', "--"));
+    let model_dir = cache_dir.join(&model_dir_name);
+
+    if model_dir.is_dir() {
+        if let Err(e) = std::fs::remove_dir_all(&model_dir) {
+            log::error!("Failed to remove {}: {e}", model_dir.display());
+            if let Some(entry) = registry.lock().unwrap().get_mut(model_id) {
+                entry.status = DownloadStatus::Error(format!("Delete failed: {e}"));
+            }
+            return;
+        }
+        log::info!("Deleted cache dir: {}", model_dir.display());
+    }
+
+    // Rescan so status resets to NotDownloaded
+    let cfg = config::load_config();
+    let mut reg = registry.lock().unwrap();
+    reg.scan_cache(&cfg.models);
+    // If scan_cache didn't find it (expected), ensure it's marked NotDownloaded
+    if let Some(entry) = reg.get_mut(model_id) {
+        if matches!(entry.status, DownloadStatus::Downloaded { .. }) {
+            entry.status = DownloadStatus::NotDownloaded;
+        }
+    }
 }
 
 fn format_size(bytes: u64) -> String {

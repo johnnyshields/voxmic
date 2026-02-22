@@ -127,7 +127,17 @@ fn parse_key_code(token: &str) -> Result<Code> {
 
 /// Register the configured hotkey, returning `None` if registration fails.
 pub fn setup_hotkeys(cfg: &HotkeyConfig) -> Result<Option<(GlobalHotKeyManager, u32)>> {
-    let hotkey = parse_shortcut(&cfg.shortcut)?;
+    let hotkey = match parse_shortcut(&cfg.shortcut) {
+        Ok(h) => h,
+        Err(e) => {
+            log::warn!(
+                "Invalid hotkey {:?}: {e}. Continuing without hotkey — \
+                 set a valid hotkey in Settings.",
+                cfg.shortcut
+            );
+            return Ok(None);
+        }
+    };
 
     let manager = GlobalHotKeyManager::new().context("create hotkey manager")?;
     let id = hotkey.id();

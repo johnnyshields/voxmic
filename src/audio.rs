@@ -1,5 +1,6 @@
 //! Audio capture — cpal always-on input stream with optional VAD gating.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -82,5 +83,88 @@ pub fn start_capture(state: Arc<SharedState>, cfg: &Config) -> Result<cpal::Stre
         .context("Failed to build audio input stream")?;
 
     stream.play().context("Failed to start audio stream")?;
+    Ok(stream)
+}
+
+/// List all available audio input device names.
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    match host.input_devices() {
+        Ok(devices) => devices.filter_map(|d| d.name().ok()).collect(),
+        Err(e) => {
+            log::warn!("Failed to enumerate input devices: {e}");
+            vec![]
+        }
+    }
+}
+
+/// Start a test audio capture stream that sends RMS levels and raw samples.
+///
+/// Returns (stream, level_receiver). The stream must be kept alive.
+/// `test_chunks` receives raw f32 samples when `recording` is true.
+pub fn start_test_capture(
+    device_pattern: &str,
+    sample_rate: u32,
+    level_tx: std::sync::mpsc::Sender<f32>,
+    test_chunks: Arc<std::sync::Mutex<Vec<f32>>>,
+    recording: Arc<AtomicBool>,
+) -> Result<cpal::Stream> {
+    let host = cpal::default_host();
+    let pattern = device_pattern.to_lowercase();
+    let device = host
+        .input_devices()
+        .context("Failed to enumerate input devices")?
+        .find(|d| {
+            d.name()
+                .map(|n| n.to_lowercase().contains(&pattern))
+                .unwrap_or(false)
+        })
+        .or_else(|| host.default_input_device())
+        .context("No input audio device found")?;
+
+    let desired_rate = SampleRate(sample_rate);
+    let stream_config: StreamConfig = match device
+        .supported_input_configs()
+        .context("Cannot query device input configs")?
+        .find(|c| {
+            c.channels() >= 1
+                && c.min_sample_rate() <= desired_rate
+                && desired_rate <= c.max_sample_rate()
+        }) {
+        Some(range) => {
+            let mut sc: StreamConfig = range.with_sample_rate(desired_rate).into();
+            sc.channels = 1;
+            sc
+        }
+        None => {
+            let default = device
+                .default_input_config()
+                .context("No default input config")?;
+            default.into()
+        }
+    };
+
+    let stream = device
+        .build_input_stream(
+            &stream_config,
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                // Compute RMS for level meter
+                if !data.is_empty() {
+                    let sum: f32 = data.iter().map(|s| s * s).sum();
+                    let rms = (sum / data.len() as f32).sqrt();
+                    let _ = level_tx.send(rms);
+                }
+                // Record raw samples if recording flag is set
+                if recording.load(std::sync::atomic::Ordering::Relaxed) {
+                    let mut chunks = test_chunks.lock().unwrap();
+                    chunks.extend_from_slice(data);
+                }
+            },
+            |err| log::error!("Test audio capture error: {err}"),
+            None,
+        )
+        .context("Failed to build test audio input stream")?;
+
+    stream.play().context("Failed to start test audio stream")?;
     Ok(stream)
 }

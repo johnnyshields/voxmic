@@ -5,6 +5,7 @@ use crate::models::{DownloadStatus, ModelEntry};
 /// Scan the HuggingFace Hub cache to determine which models are already downloaded.
 ///
 /// HF Hub cache layout: `~/.cache/huggingface/hub/models--{org}--{name}/snapshots/{hash}/`
+/// Only updates entries that are still `NotDownloaded`.
 pub fn scan_hf_cache(entries: &mut [ModelEntry]) {
     let cache_dir = match hf_cache_dir() {
         Some(d) => d,
@@ -15,13 +16,16 @@ pub fn scan_hf_cache(entries: &mut [ModelEntry]) {
     };
 
     for entry in entries.iter_mut() {
+        if !matches!(entry.status, DownloadStatus::NotDownloaded) {
+            continue;
+        }
+
         if let Some(ref repo) = entry.info.hf_repo {
             let model_dir_name = format!("models--{}", repo.replace('/', "--"));
             let model_dir = cache_dir.join(&model_dir_name);
             let snapshots_dir = model_dir.join("snapshots");
 
             if snapshots_dir.is_dir() {
-                // Find the latest snapshot (any subdirectory)
                 if let Some((path, size)) = find_snapshot(&snapshots_dir) {
                     log::info!(
                         "Found cached model '{}' at {:?} ({} bytes)",
@@ -50,6 +54,11 @@ pub fn hf_cache_dir() -> Option<PathBuf> {
     }
     // Default: ~/.cache/huggingface/hub/
     dirs::cache_dir().map(|d| d.join("huggingface").join("hub"))
+}
+
+/// Return the effective cache directory for downloads.
+pub fn effective_cache_dir() -> Option<PathBuf> {
+    hf_cache_dir()
 }
 
 /// Find a snapshot directory and compute total file size.

@@ -216,6 +216,7 @@ pub fn load_config() -> Config {
             || raw.get("vad").is_some()
             || raw.get("audio").is_some()
             || raw.get("hotkey").is_some()
+            || raw.get("models").is_some()
         {
             return cfg;
         }

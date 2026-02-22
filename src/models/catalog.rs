@@ -78,8 +78,14 @@ pub fn all_models() -> Vec<ModelInfo> {
             backend: ModelBackend::Voxtral,
             category: ModelCategory::Stt,
             hf_repo: Some("mistralai/Voxtral-Mini-3B-2507".into()),
-            hf_files: vec![],
-            approx_size_bytes: 8_900 * MB,
+            hf_files: vec![
+                "config.json".into(),
+                "consolidated.safetensors".into(),
+                "params.json".into(),
+                "preprocessor_config.json".into(),
+                "tekken.json".into(),
+            ],
+            approx_size_bytes: 9_400 * MB,
         },
         ModelInfo {
             id: "silero/vad-v5".into(),

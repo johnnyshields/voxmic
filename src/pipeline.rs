@@ -1,6 +1,6 @@
 //! Pipeline — wires together STT → Router → Action.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::action::ActionExecutor;
 use crate::config::Config;
@@ -15,8 +15,11 @@ pub struct Pipeline {
 
 impl Pipeline {
     /// Build a pipeline from config, creating all backends.
-    pub fn from_config(cfg: &Config) -> anyhow::Result<Self> {
-        let stt = crate::stt::create_transcriber(&cfg.stt)?;
+    ///
+    /// `stt_model_dir` is the resolved local model path for backends that need
+    /// local model files (e.g. voxtral-native). Other backends ignore it.
+    pub fn from_config(cfg: &Config, stt_model_dir: Option<PathBuf>) -> anyhow::Result<Self> {
+        let stt = crate::stt::create_transcriber(&cfg.stt, stt_model_dir)?;
         let router = crate::router::create_router(&cfg.router)?;
         let action = crate::action::create_action(&cfg.action)?;
 

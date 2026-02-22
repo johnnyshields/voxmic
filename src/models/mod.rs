@@ -56,6 +56,14 @@ impl ModelRegistry {
         }
     }
 
+    /// Return the local path for a downloaded model, if available.
+    pub fn model_path(&self, id: &str) -> Option<PathBuf> {
+        self.get(id).and_then(|e| match &e.status {
+            DownloadStatus::Downloaded { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+    }
+
     pub fn get(&self, id: &str) -> Option<&ModelEntry> {
         self.entries.iter().find(|e| e.info.id == id)
     }

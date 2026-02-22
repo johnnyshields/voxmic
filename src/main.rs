@@ -174,6 +174,19 @@ fn run_gui(
         Err(e) => return Err(e),
     };
 
+    // Update tray tooltip to reflect pending subsystems
+    {
+        let stt_pending = pipeline.stt.name().contains("pending");
+        let hotkey_pending = hotkey_id.is_none();
+        if stt_pending || hotkey_pending {
+            let mut parts = Vec::new();
+            if hotkey_pending { parts.push("hotkey"); }
+            if stt_pending { parts.push("STT model"); }
+            let tooltip = format!("voxctrl — pending: {}", parts.join(", "));
+            let _ = tray.set_tooltip(Some(&tooltip));
+        }
+    }
+
     let mut app = App {
         state,
         tray: Some(tray),
@@ -186,6 +199,9 @@ fn run_gui(
         menu_ids,
     };
 
+    if hotkey_id.is_none() {
+        log::warn!("Hotkey not active — configure in Settings");
+    }
     log::info!("Ready — green=idle  red=recording  amber=transcribing");
     event_loop.run_app(&mut app)?;
 
@@ -214,14 +230,13 @@ fn main() -> Result<()> {
     log::info!("Config: stt={}, vad={}, router={}, action={}",
         cfg.stt.backend, cfg.vad.backend, cfg.router.backend, cfg.action.backend);
 
-    // Build model registry and scan cache
+    // Build model registry and scan cache (respecting config paths / cache_dir)
     let mut registry = models::ModelRegistry::new(models::catalog::all_models());
     registry.scan_cache(&cfg.models);
 
-    // Consent check — ensure required model is available
-    if let Err(e) = models::consent::ensure_model_available(&cfg, &mut registry) {
-        log::error!("Model not available: {e}");
-    }
+    // Resolve model path from registry (no auto-download; pending state if missing)
+    let stt_model_dir = models::catalog::required_model_id(&cfg)
+        .and_then(|id| registry.model_path(&id));
 
     // Mark in-use model
     if let Some(model_id) = models::catalog::required_model_id(&cfg) {
@@ -231,7 +246,7 @@ fn main() -> Result<()> {
     #[cfg(feature = "gui")]
     let registry = Arc::new(Mutex::new(registry));
     let state = Arc::new(SharedState::new());
-    let pipeline = Arc::new(pipeline::Pipeline::from_config(&cfg)?);
+    let pipeline = Arc::new(pipeline::Pipeline::from_config(&cfg, stt_model_dir)?);
     let audio_stream = audio::start_capture(state.clone(), &cfg)?;
     log::info!("Audio stream open (always-on)");
 

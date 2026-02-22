@@ -5,13 +5,13 @@ edition = "2021"
 description = "Pluggable voice-to-action pipeline — mic → VAD → STT → router → action"
 
 [features]
-default = ["stt-voxtral-http", "vad-energy", "gui", "tui"]
+default = ["stt-voxtral-http", "stt-voxtral-native", "vad-energy", "gui", "tui"]
 
 # STT backends
 stt-voxtral-http   = ["dep:ureq"]
 stt-whisper-cpp    = ["dep:whisper-rs"]
 stt-whisper-native  = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf-hub", "dep:tokenizers"]
-stt-voxtral-native  = ["dep:voxtral-mini-realtime"]
+stt-voxtral-native  = ["dep:voxtral-mini-realtime", "dep:burn"]
 
 # VAD
 vad-energy = []
@@ -30,7 +30,7 @@ cuda = []
 consent-dialog = ["dep:rfd"]
 
 # UI modes
-gui = ["dep:tray-icon", "dep:global-hotkey", "dep:winit", "dep:muda", "dep:eframe", "dep:egui", "dep:rfd"]
+gui = ["dep:tray-icon", "dep:global-hotkey", "dep:winit", "dep:muda", "dep:eframe", "dep:egui", "dep:egui_extras", "dep:ureq", "dep:rfd"]
 tui = ["dep:ratatui", "dep:crossterm"]
 
 [dependencies]
@@ -52,6 +52,7 @@ muda          = { version = "0.15", optional = true }
 # GUI: Model manager
 eframe = { version = "0.30", default-features = false, features = ["default_fonts", "glow"], optional = true }
 egui   = { version = "0.30", optional = true }
+egui_extras = { version = "0.30", optional = true }
 
 # TUI
 ratatui   = { version = "0.29", optional = true }
@@ -78,6 +79,7 @@ tokenizers          = { version = "0.20", optional = true }
 
 # STT: voxtral-native (optional) — pure Rust Voxtral via Burn ML framework
 voxtral-mini-realtime = { git = "https://github.com/TrevorS/voxtral-mini-realtime-rs", default-features = false, features = ["hub", "native-tokenizer", "wgpu"], optional = true }
+burn = { version = "0.20", default-features = false, features = ["wgpu"], optional = true }
 
 # VAD: silero (optional)
 ort = { version = "2.0.0-rc.9", optional = true }

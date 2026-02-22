@@ -9,7 +9,7 @@ pub mod whisper_native;
 #[cfg(feature = "stt-voxtral-native")]
 pub mod voxtral_native;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::SttConfig;
 
@@ -25,7 +25,10 @@ pub trait Transcriber: Send + Sync {
 }
 
 /// Create an STT backend based on config.
-pub fn create_transcriber(cfg: &SttConfig) -> anyhow::Result<Box<dyn Transcriber>> {
+///
+/// `model_dir` is the resolved local path for backends that need local model files
+/// (e.g. voxtral-native). Other backends ignore it.
+pub fn create_transcriber(cfg: &SttConfig, model_dir: Option<PathBuf>) -> anyhow::Result<Box<dyn Transcriber>> {
     match cfg.backend.as_str() {
         "voxtral-http" => {
             #[cfg(feature = "stt-voxtral-http")]
@@ -47,7 +50,7 @@ pub fn create_transcriber(cfg: &SttConfig) -> anyhow::Result<Box<dyn Transcriber
         }
         "voxtral-native" => {
             #[cfg(feature = "stt-voxtral-native")]
-            return Ok(Box::new(voxtral_native::VoxtralNativeTranscriber::new(cfg)?));
+            return Ok(Box::new(voxtral_native::VoxtralNativeTranscriber::new(model_dir)?));
             #[cfg(not(feature = "stt-voxtral-native"))]
             anyhow::bail!("stt-voxtral-native feature not compiled in");
         }
