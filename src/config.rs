@@ -1,6 +1,7 @@
 //! Config — nested sections for each pipeline stage, backwards-compatible with flat config.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 // ── Sub-configs for each pipeline stage ────────────────────────────────────
@@ -120,6 +121,14 @@ impl Default for AudioConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelsConfig {
+    #[serde(default)]
+    pub models_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub model_paths: HashMap<String, PathBuf>,
+}
+
 // ── Top-level config ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +145,8 @@ pub struct Config {
     pub audio: AudioConfig,
     #[serde(default)]
     pub hotkey: HotkeyConfig,
+    #[serde(default)]
+    pub models: ModelsConfig,
 }
 
 impl Default for Config {
@@ -147,6 +158,7 @@ impl Default for Config {
             action: ActionConfig::default(),
             audio: AudioConfig::default(),
             hotkey: HotkeyConfig::default(),
+            models: ModelsConfig::default(),
         }
     }
 }
@@ -269,6 +281,7 @@ fn load_legacy_config(contents: &str) -> Config {
                 .unwrap_or(default_chunk_duration_ms()),
         },
         hotkey: HotkeyConfig::default(),
+        models: ModelsConfig::default(),
     }
 }
 

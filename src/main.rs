@@ -214,7 +214,7 @@ fn main() -> Result<()> {
 
     // Build model registry and scan cache
     let mut registry = models::ModelRegistry::new(models::catalog::all_models());
-    registry.scan_cache();
+    registry.scan_cache(&cfg.models);
 
     // Consent check — ensure required model is available
     if let Err(e) = models::consent::ensure_model_available(&cfg, &mut registry) {

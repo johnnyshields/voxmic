@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use global_hotkey::hotkey::HotKey;
@@ -162,6 +164,8 @@ pub struct SettingsApp {
     stt_backend: String,
     whisper_model: String,
     vad_backend: String,
+    models_directory: Option<PathBuf>,
+    model_paths: HashMap<String, PathBuf>,
     saved_flash: Option<std::time::Instant>,
     // Hotkey capture
     capture_state: CaptureState,
@@ -201,7 +205,7 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
     let cfg = config::load_config();
 
     let mut registry = crate::models::ModelRegistry::new(crate::models::catalog::all_models());
-    registry.scan_cache();
+    registry.scan_cache(&cfg.models);
 
     if let Some(model_id) = crate::models::catalog::required_model_id(&cfg) {
         registry.set_in_use(&model_id);
@@ -224,6 +228,8 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
         stt_backend: cfg.stt.backend.clone(),
         whisper_model: cfg.stt.whisper_model.clone(),
         vad_backend: cfg.vad.backend.clone(),
+        models_directory: cfg.models.models_directory.clone(),
+        model_paths: cfg.models.model_paths.clone(),
         saved_flash: None,
         capture_state: CaptureState::Idle,
         hotkey_include_super: include_super,
@@ -233,7 +239,7 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([500.0, 400.0])
+            .with_inner_size([650.0, 400.0])
             .with_title("voxctrl — Settings"),
         ..Default::default()
     };
@@ -420,6 +426,24 @@ impl SettingsApp {
                         }
                     });
                 ui.end_row();
+
+                ui.label("Models Directory");
+                ui.horizontal(|ui| {
+                    let display = match &self.models_directory {
+                        Some(p) => p.display().to_string(),
+                        None => "Default (HuggingFace cache)".into(),
+                    };
+                    ui.label(display);
+                    if ui.small_button("Browse\u{2026}").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.models_directory = Some(path);
+                        }
+                    }
+                    if self.models_directory.is_some() && ui.small_button("Reset").clicked() {
+                        self.models_directory = None;
+                    }
+                });
+                ui.end_row();
             });
 
         ui.add_space(12.0);
@@ -472,6 +496,8 @@ impl SettingsApp {
         cfg.stt.backend = self.stt_backend.clone();
         cfg.stt.whisper_model = self.whisper_model.clone();
         cfg.vad.backend = self.vad_backend.clone();
+        cfg.models.models_directory = self.models_directory.clone();
+        cfg.models.model_paths = self.model_paths.clone();
         config::save_config(&cfg);
         self.saved_flash = Some(std::time::Instant::now());
         log::info!("Config saved");
@@ -586,30 +612,55 @@ impl SettingsApp {
         });
         ui.separator();
 
-        // Table
-        let registry = self.registry.lock().unwrap();
-        let active_tab = self.model_tab;
+        // Snapshot data from registry (release lock before UI that may open dialogs)
+        let (filtered, total_bytes) = {
+            let registry = self.registry.lock().unwrap();
+            let active_tab = self.model_tab;
+            let filtered: Vec<_> = registry
+                .entries()
+                .iter()
+                .filter(|e| e.info.category == active_tab)
+                .map(|e| ModelRowSnapshot {
+                    id: e.info.id.clone(),
+                    display_name: e.info.display_name.clone(),
+                    approx_size_bytes: e.info.approx_size_bytes,
+                    status: e.status.clone(),
+                    in_use: e.in_use,
+                })
+                .collect();
+            let total_bytes: u64 = registry
+                .entries()
+                .iter()
+                .filter_map(|e| {
+                    if let DownloadStatus::Downloaded { size_bytes, .. } = &e.status {
+                        Some(*size_bytes)
+                    } else {
+                        None
+                    }
+                })
+                .sum();
+            (filtered, total_bytes)
+        };
 
+        // Collect deferred actions (folder picker must happen outside grid)
+        let mut browse_model_id: Option<String> = None;
+
+        // Table
         egui::Grid::new("model_table")
             .striped(true)
-            .min_col_width(80.0)
+            .min_col_width(60.0)
             .show(ui, |ui| {
                 // Header
                 ui.strong("Model");
                 ui.strong("Size");
                 ui.strong("Status");
                 ui.strong("Action");
+                ui.strong("Local Path");
                 ui.end_row();
 
-                let filtered: Vec<_> = registry
-                    .entries()
-                    .iter()
-                    .filter(|e| e.info.category == active_tab)
-                    .collect();
-
                 for entry in &filtered {
-                    ui.label(&entry.info.display_name);
-                    ui.label(format_size(entry.info.approx_size_bytes));
+                    ui.label(&entry.display_name);
+                    ui.label(format_size(entry.approx_size_bytes));
 
                     // Status column
                     match &entry.status {
@@ -640,7 +691,7 @@ impl SettingsApp {
                     let _action = match &entry.status {
                         DownloadStatus::NotDownloaded | DownloadStatus::Error(_) => {
                             if ui.button("Download").clicked() {
-                                Some(Action::Download(entry.info.id.clone()))
+                                Some(Action::Download(entry.id.clone()))
                             } else {
                                 None
                             }
@@ -651,7 +702,7 @@ impl SettingsApp {
                         }
                         DownloadStatus::Downloaded { .. } => {
                             if ui.button("Delete").clicked() {
-                                Some(Action::Delete(entry.info.id.clone()))
+                                Some(Action::Delete(entry.id.clone()))
                             } else {
                                 None
                             }
@@ -662,27 +713,44 @@ impl SettingsApp {
                         }
                     };
 
+                    // Local Path column
+                    ui.horizontal(|ui| {
+                        if let Some(override_path) = self.model_paths.get(&entry.id) {
+                            let display = abbreviate_path(override_path);
+                            ui.label(display).on_hover_text(override_path.display().to_string());
+                        } else if let DownloadStatus::Downloaded { ref path, .. } = entry.status {
+                            let display = abbreviate_path(path);
+                            ui.label(display).on_hover_text(path.display().to_string());
+                        } else {
+                            ui.label("\u{2014}"); // em-dash
+                        }
+                        if ui.small_button("\u{1F4C2}").on_hover_text("Set local path").clicked() {
+                            browse_model_id = Some(entry.id.clone());
+                        }
+                    });
+
                     ui.end_row();
                 }
             });
 
-        // Footer
-        ui.separator();
-        if let Some(cache_dir) = crate::models::cache_scanner::hf_cache_dir() {
-            ui.label(format!("Cache: {}", cache_dir.display()));
+        // Handle deferred folder picker (outside grid / lock scope)
+        if let Some(model_id) = browse_model_id {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                self.model_paths.insert(model_id, path);
+            }
         }
 
-        let total_bytes: u64 = registry
-            .entries()
-            .iter()
-            .filter_map(|e| {
-                if let DownloadStatus::Downloaded { size_bytes, .. } = &e.status {
-                    Some(*size_bytes)
-                } else {
-                    None
-                }
-            })
-            .sum();
+        // Footer
+        ui.separator();
+        let dir_label = match &self.models_directory {
+            Some(p) => format!("Models Directory: {}", p.display()),
+            None => match crate::models::cache_scanner::hf_cache_dir() {
+                Some(cache_dir) => format!("Models Directory: {}", cache_dir.display()),
+                None => "Models Directory: (unknown)".into(),
+            },
+        };
+        ui.label(dir_label);
+
         if total_bytes > 0 {
             ui.label(format!("Total disk usage: {}", format_size(total_bytes)));
         }
@@ -690,6 +758,15 @@ impl SettingsApp {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+/// Snapshot of a model row for rendering (avoids holding the registry lock during UI).
+struct ModelRowSnapshot {
+    id: String,
+    display_name: String,
+    approx_size_bytes: u64,
+    status: DownloadStatus,
+    in_use: bool,
+}
 
 #[allow(dead_code)]
 enum Action {
@@ -707,4 +784,14 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// Shorten a path for display in the table (show last 2 components).
+fn abbreviate_path(path: &std::path::Path) -> String {
+    let components: Vec<_> = path.components().collect();
+    if components.len() <= 2 {
+        return path.display().to_string();
+    }
+    let tail: PathBuf = components[components.len() - 2..].iter().collect();
+    format!("\u{2026}/{}", tail.display())
 }

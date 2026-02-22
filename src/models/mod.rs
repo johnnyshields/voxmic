@@ -7,6 +7,7 @@ pub mod downloader;
 pub use catalog::ModelCategory;
 pub use catalog::ModelInfo;
 
+use crate::config::ModelsConfig;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -42,8 +43,17 @@ impl ModelRegistry {
         Self { entries }
     }
 
-    pub fn scan_cache(&mut self) {
+    pub fn scan_cache(&mut self, models_cfg: &ModelsConfig) {
+        // 1. Custom models directory (LM Studio-style layout)
+        if let Some(ref dir) = models_cfg.models_directory {
+            cache_scanner::scan_models_directory(&mut self.entries, dir);
+        }
+        // 2. HuggingFace cache (standard HF layout)
         cache_scanner::scan_hf_cache(&mut self.entries);
+        // 3. Per-model path overrides (highest priority)
+        if !models_cfg.model_paths.is_empty() {
+            cache_scanner::apply_model_paths(&mut self.entries, &models_cfg.model_paths);
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<&ModelEntry> {
