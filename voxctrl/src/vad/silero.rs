@@ -87,7 +87,15 @@ impl VoiceDetector for SileroVad {
             }
         };
 
-        let outputs = match self.session.run(ort::inputs![input, sr, h, c]) {
+        let session_inputs = match ort::inputs![input, sr, h, c] {
+            Ok(i) => i,
+            Err(e) => {
+                log::error!("silero: failed to build session inputs: {e}");
+                return false;
+            }
+        };
+
+        let outputs = match self.session.run(session_inputs) {
             Ok(o) => o,
             Err(e) => {
                 log::error!("silero: inference failed: {e}");
@@ -95,26 +103,27 @@ impl VoiceDetector for SileroVad {
             }
         };
 
-        // Extract speech probability.
-        let prob = outputs
-            .get(0)
-            .and_then(|v| v.try_extract_raw_tensor::<f32>().ok())
+        if outputs.len() < 3 {
+            log::error!("silero: expected 3 outputs, got {}", outputs.len());
+            return false;
+        }
+
+        // Extract speech probability (output 0).
+        let prob = outputs[0]
+            .try_extract_raw_tensor::<f32>()
             .map(|(_, data)| data[0])
             .unwrap_or(0.0);
 
-        // Update LSTM states for next call.
-        if let Some(hn) = outputs.get(1) {
-            if let Ok((_, data)) = hn.try_extract_raw_tensor::<f32>() {
-                if data.len() == STATE_LEN {
-                    self.h.copy_from_slice(data);
-                }
+        // Update LSTM hidden state (output 1).
+        if let Ok((_, data)) = outputs[1].try_extract_raw_tensor::<f32>() {
+            if data.len() == STATE_LEN {
+                self.h.copy_from_slice(data);
             }
         }
-        if let Some(cn) = outputs.get(2) {
-            if let Ok((_, data)) = cn.try_extract_raw_tensor::<f32>() {
-                if data.len() == STATE_LEN {
-                    self.c.copy_from_slice(data);
-                }
+        // Update LSTM cell state (output 2).
+        if let Ok((_, data)) = outputs[2].try_extract_raw_tensor::<f32>() {
+            if data.len() == STATE_LEN {
+                self.c.copy_from_slice(data);
             }
         }
 
