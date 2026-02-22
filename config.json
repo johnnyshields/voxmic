@@ -1,4 +1,6 @@
 {
+  "backend":                "whisper",
+
   "device_pattern":         "DJI",
   "sample_rate":            16000,
   "chunk_duration":         0.1,

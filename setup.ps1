@@ -67,13 +67,13 @@ if (-not (Test-Path $llamaExe)) {
 Step 3 6 "Installing Python packages"
 $pythonExe = (Get-Command python -ErrorAction Stop).Source
 Write-Host "    Python: $pythonExe"
-& $pythonExe -m pip install sounddevice numpy scipy requests --quiet
+& $pythonExe -m pip install sounddevice numpy scipy requests faster-whisper pystray pillow pynput --quiet
 if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
-OK "sounddevice, numpy, scipy, requests"
+OK "sounddevice, numpy, scipy, requests, faster-whisper, pystray, pillow, pynput"
 
 # ---- 4. Deploy scripts ------------------------------------------------------
 Step 4 6 "Deploying scripts"
-foreach ($f in @("transcribe.py", "config.json", "list-devices.py", "monitor.bat")) {
+foreach ($f in @("transcribe.py", "tray_app.py", "config.json", "list-devices.py", "monitor.bat")) {
     $src = Join-Path $SCRIPT_DIR $f
     if (Test-Path $src) {
         Copy-Item $src "$WORKSPACE\$f" -Force
@@ -134,7 +134,7 @@ Unregister-ScheduledTask -TaskName "VoxtralMic" -Confirm:$false -ErrorAction Sil
 
 $micAction = New-ScheduledTaskAction `
     -Execute          $pythonExe `
-    -Argument         "`"$WORKSPACE\transcribe.py`"" `
+    -Argument         "`"$WORKSPACE\tray_app.py`"" `
     -WorkingDirectory $WORKSPACE
 
 $micTrigger = New-ScheduledTaskTrigger -AtLogOn -User $CURRENT_USER
@@ -157,7 +157,7 @@ Register-ScheduledTask `
     -Trigger     $micTrigger `
     -Settings    $micSettings `
     -Principal   $micPrincipal `
-    -Description "Captures DJI mic audio and transcribes via Voxtral llama-server" `
+    -Description "Voxtral system tray dictation app (Ctrl+Win to dictate)" `
     -Force | Out-Null
 
 OK "VoxtralMic task installed (runs at logon as $CURRENT_USER)"
@@ -178,10 +178,10 @@ Write-Host "  VoxtralLLM  Runs at boot  (SYSTEM, no user login needed)"
 Write-Host "  VoxtralMic  Runs at logon ($CURRENT_USER, interactive audio session)"
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. Wait for model download (~3 GB):"
+Write-Host "  1. Wait for Voxtral model download (~3 GB) — optional if using faster-whisper:"
 Write-Host "       Get-Content '$WORKSPACE\logs\llm.log' -Wait"
 Write-Host ""
-Write-Host "  2. Verify server is ready:"
+Write-Host "  2. Verify Voxtral server is ready (optional):"
 Write-Host "       Invoke-RestMethod http://127.0.0.1:$LLM_PORT/health"
 Write-Host ""
 Write-Host "  3. Find your DJI mic device:"
@@ -189,11 +189,17 @@ Write-Host "       python '$WORKSPACE\list-devices.py'"
 Write-Host "     Edit config if pattern doesn't match 'DJI':"
 Write-Host "       notepad '$WORKSPACE\config.json'"
 Write-Host ""
-Write-Host "  4. Start mic capture (or log out/back in to auto-trigger):"
+Write-Host "  4. Start tray app (or log out/back in to auto-trigger):"
 Write-Host "       Start-ScheduledTask -TaskName VoxtralMic"
+Write-Host "     A mic icon appears in the system tray."
 Write-Host ""
-Write-Host "  5. Watch live transcription:"
-Write-Host "       '$WORKSPACE\monitor.bat'"
+Write-Host "  5. Dictate:"
+Write-Host "       Hold Ctrl+Win while speaking."
+Write-Host "       Release Win — text is transcribed and typed at your cursor."
+Write-Host "       Right-click the tray icon to switch backend or download models."
+Write-Host ""
+Write-Host "  6. Watch the log:"
+Write-Host "       Get-Content '$env:LOCALAPPDATA\Voxtral\logs\tray.log' -Wait"
 Write-Host ""
 Write-Host "Manage:"
 Write-Host "  Start-ScheduledTask / Stop-ScheduledTask -TaskName VoxtralLLM"
