@@ -35,6 +35,19 @@ tempfile = "3"
 # Error handling
 anyhow = "1"
 
+# Model management
+dirs = "5"
+rfd = { version = "0.15", optional = true }
+
+# UI — Model manager (optional)
+eframe = { version = "0.30", optional = true, default-features = false, features = ["default_fonts", "glow"] }
+egui   = { version = "0.30", optional = true }
+
+[features]
+default = []
+consent-dialog = ["dep:rfd"]
+ui-model-manager = ["dep:eframe", "dep:egui"]
+
 [package.metadata.wix]
 upgrade-guid = "EB4044A7-9711-4616-B3E0-8B8381C73C7B"
 path-guid = "4E78E5B7-78B4-4C95-93B1-87B3655662BB"

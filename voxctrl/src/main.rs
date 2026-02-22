@@ -7,13 +7,17 @@ mod audio;
 mod backend;
 mod config;
 mod hotkey;
+mod models;
 mod tray;
 mod typing;
+#[cfg(feature = "ui-model-manager")]
+mod ui;
 
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use global_hotkey::GlobalHotKeyEvent;
+use muda::MenuEvent;
 use tray_icon::TrayIconEvent;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -54,6 +58,8 @@ struct App {
     cfg: config::Config,
     backend: Arc<dyn backend::TranscriptionBackend + Send + Sync>,
     _audio_stream: Option<cpal::Stream>,
+    registry: Arc<Mutex<models::ModelRegistry>>,
+    menu_ids: tray::TrayMenuIds,
 }
 
 impl ApplicationHandler for App {
@@ -74,6 +80,24 @@ impl ApplicationHandler for App {
         // Process tray icon events
         if let Ok(event) = TrayIconEvent::receiver().try_recv() {
             log::trace!("Tray event: {:?}", event);
+        }
+
+        // Process menu events (Quit, Manage Models...)
+        if let Ok(event) = MenuEvent::receiver().try_recv() {
+            if event.id == self.menu_ids.quit {
+                log::info!("Quit requested");
+                _event_loop.exit();
+            } else if event.id == self.menu_ids.manage_models {
+                log::info!("Opening model manager...");
+                #[cfg(feature = "ui-model-manager")]
+                {
+                    ui::open_model_manager(self.registry.clone());
+                }
+                #[cfg(not(feature = "ui-model-manager"))]
+                {
+                    log::warn!("Model manager UI not available (compile with --features ui-model-manager)");
+                }
+            }
         }
 
         // Process global hotkey events
@@ -102,6 +126,23 @@ fn main() -> Result<()> {
     let cfg = config::load_config();
     log::info!("Config loaded: backend={}", cfg.backend);
 
+    // Build model registry and scan cache
+    let mut registry = models::ModelRegistry::new(models::catalog::all_models());
+    registry.scan_cache();
+
+    // Consent check — ensure required model is available
+    if let Err(e) = models::consent::ensure_model_available(&cfg, &mut registry) {
+        log::error!("Model not available: {e}");
+        // Continue anyway — user declined download, backend may still work (e.g. HTTP backends)
+    }
+
+    // Mark in-use model
+    if let Some(model_id) = models::catalog::required_model_id(&cfg) {
+        registry.set_in_use(&model_id);
+    }
+
+    let registry = Arc::new(Mutex::new(registry));
+
     // Create shared state
     let state = Arc::new(SharedState::new());
 
@@ -113,7 +154,7 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new()?;
 
     // Set up tray icon (must be created after EventLoop on some platforms)
-    let tray = tray::build_tray()?;
+    let (tray, menu_ids) = tray::build_tray()?;
     log::info!("Tray icon created");
 
     // Set up global hotkey
@@ -133,6 +174,8 @@ fn main() -> Result<()> {
         cfg,
         backend,
         _audio_stream: Some(audio_stream),
+        registry,
+        menu_ids,
     };
 
     log::info!("Tray icon running — green=idle  red=recording  amber=transcribing");

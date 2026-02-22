@@ -1,8 +1,14 @@
 use anyhow::{Context, Result};
-use muda::{Menu, MenuItem, PredefinedMenuItem};
+use muda::{Menu, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::AppStatus;
+
+/// Menu item IDs returned by `build_tray()` for event matching in the event loop.
+pub struct TrayMenuIds {
+    pub quit: MenuId,
+    pub manage_models: MenuId,
+}
 
 /// Generate a 64x64 RGBA icon with a colored circle.
 pub fn make_icon(status: AppStatus) -> Icon {
@@ -36,13 +42,22 @@ pub fn make_icon(status: AppStatus) -> Icon {
 }
 
 /// Build the system tray icon with menu.
-pub fn build_tray() -> Result<TrayIcon> {
+pub fn build_tray() -> Result<(TrayIcon, TrayMenuIds)> {
     let menu = Menu::new();
-    let _label = MenuItem::new("voxctrl Dictation", false, None);
-    let _quit = MenuItem::new("Quit", true, None);
-    menu.append(&_label).context("menu append label")?;
+    let label = MenuItem::new("voxctrl Dictation", false, None);
+    let manage_models = MenuItem::new("Manage Models...", true, None);
+    let quit = MenuItem::new("Quit", true, None);
+
+    let menu_ids = TrayMenuIds {
+        quit: quit.id().clone(),
+        manage_models: manage_models.id().clone(),
+    };
+
+    menu.append(&label).context("menu append label")?;
     menu.append(&PredefinedMenuItem::separator()).context("menu append separator")?;
-    menu.append(&_quit).context("menu append quit")?;
+    menu.append(&manage_models).context("menu append manage models")?;
+    menu.append(&PredefinedMenuItem::separator()).context("menu append separator 2")?;
+    menu.append(&quit).context("menu append quit")?;
 
     let icon = make_icon(AppStatus::Idle);
     let tray = TrayIconBuilder::new()
@@ -52,7 +67,7 @@ pub fn build_tray() -> Result<TrayIcon> {
         .build()
         .context("build tray icon")?;
 
-    Ok(tray)
+    Ok((tray, menu_ids))
 }
 
 /// Update the tray icon color to reflect current status.
