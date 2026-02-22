@@ -1,10 +1,10 @@
-# 2026-02-22 — voxmic: Cross-Platform Rust Tray Dictation App (Design)
+# 2026-02-22 — voxctrl: Cross-Platform Rust Tray Dictation App (Design)
 
 ## Overview
 
-Design discussion for **voxmic** — a rewrite of the Python `tray_app.py` dictation
-app in Rust, targeting a single self-contained binary (`voxmic.exe` on Windows,
-`voxmic` on macOS/Linux) with no runtime dependencies.
+Design discussion for **voxctrl** — a rewrite of the Python `tray_app.py` dictation
+app in Rust, targeting a single self-contained binary (`voxctrl.exe` on Windows,
+`voxctrl` on macOS/Linux) with no runtime dependencies.
 
 The app listens for a global **Ctrl+Win** hotkey (hold to record, release to
 transcribe), sends recorded audio to a running **llama-server** instance running
@@ -16,13 +16,13 @@ window was active when the hotkey fired.
 ## Key Architectural Decisions
 
 ### 1. Rust over Python
-| Factor | Python (`tray_app.py`) | Rust (`voxmic`) |
+| Factor | Python (`tray_app.py`) | Rust (`voxctrl`) |
 |---|---|---|
 | Distribution | Needs Python + 6 pip packages | Single binary, zero runtime |
 | Startup time | ~2–3 s (VM + imports) | < 50 ms |
 | Memory overhead | ~150 MB | ~30 MB |
 | Windows API access | ctypes hacks | First-class via `windows` crate |
-| Scheduled task | Must locate `python.exe` | Just point at `voxmic.exe` |
+| Scheduled task | Must locate `python.exe` | Just point at `voxctrl.exe` |
 
 **Rationale:** The end goal is a clean MSI/pkg installer with no external
 prerequisites. A single Rust binary makes that trivial.
@@ -118,7 +118,7 @@ State transitions: `IDLE → RECORDING → TRANSCRIBING → IDLE`
 ### Windows
 - Everything works out of the box
 - Target: `x86_64-pc-windows-msvc`
-- Output: `voxmic.exe` (single file, no DLLs needed for pure-Rust build)
+- Output: `voxctrl.exe` (single file, no DLLs needed for pure-Rust build)
 
 ### macOS
 - `winit` event loop **must** run on the main thread (enforced by AppKit)
@@ -141,28 +141,28 @@ State transitions: `IDLE → RECORDING → TRANSCRIBING → IDLE`
 
 | File | Purpose |
 |---|---|
-| `voxmic/src/main.rs` | Entry point, winit event loop, state machine |
-| `voxmic/src/config.rs` | Load/save `config.json` (serde) |
-| `voxmic/src/audio.rs` | cpal InputStream, always-open stream, chunk buffer |
-| `voxmic/src/hotkey.rs` | global-hotkey setup, Ctrl+Win detection |
-| `voxmic/src/backend/mod.rs` | `TranscriptionBackend` trait |
-| `voxmic/src/backend/voxtral.rs` | ureq HTTP POST to llama-server |
-| `voxmic/src/tray.rs` | tray-icon + muda menu, icon image generation |
-| `voxmic/src/typing.rs` | enigo text injection, window re-focus |
-| `voxmic/Cargo.toml` | Workspace manifest |
+| `voxctrl/src/main.rs` | Entry point, winit event loop, state machine |
+| `voxctrl/src/config.rs` | Load/save `config.json` (serde) |
+| `voxctrl/src/audio.rs` | cpal InputStream, always-open stream, chunk buffer |
+| `voxctrl/src/hotkey.rs` | global-hotkey setup, Ctrl+Win detection |
+| `voxctrl/src/backend/mod.rs` | `TranscriptionBackend` trait |
+| `voxctrl/src/backend/voxtral.rs` | ureq HTTP POST to llama-server |
+| `voxctrl/src/tray.rs` | tray-icon + muda menu, icon image generation |
+| `voxctrl/src/typing.rs` | enigo text injection, window re-focus |
+| `voxctrl/Cargo.toml` | Workspace manifest |
 
 ---
 
 ## Relationship to Existing Python App
 
 `tray_app.py` remains functional and is the reference implementation.
-`voxmic` is a ground-up Rust rewrite with the same UX contract:
+`voxctrl` is a ground-up Rust rewrite with the same UX contract:
 
 - Same `config.json` schema (adds no new fields)
 - Same Voxtral HTTP endpoint (`127.0.0.1:5200`)
 - Same hotkey (Ctrl+Win)
 - Same tray icon colours (green/red/amber)
-- `setup.ps1` `VoxtralMic` task can point at `voxmic.exe` once built
+- `setup.ps1` `VoxtralMic` task can point at `voxctrl.exe` once built
 
 ---
 
@@ -196,7 +196,7 @@ No automated tests defined yet. Planned:
 
 - **whisper-rs feature flag** — local offline fallback (requires cmake/MSVC,
   disabled by default)
-- **MSI installer (Windows)** — `cargo-wix` or WiX toolset; `voxmic.exe` +
+- **MSI installer (Windows)** — `cargo-wix` or WiX toolset; `voxctrl.exe` +
   scheduled task registration
 - **macOS pkg** — `cargo-bundle` + `pkgbuild`
 - **Wayland hotkey workaround** — tray menu "Hold to dictate" button using
