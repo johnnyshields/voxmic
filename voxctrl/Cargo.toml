@@ -10,7 +10,8 @@ default = ["stt-voxtral-http", "vad-energy"]
 # STT backends
 stt-voxtral-http   = ["dep:ureq"]
 stt-whisper-cpp    = ["dep:whisper-rs"]
-stt-whisper-native = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf-hub", "dep:tokenizers"]
+stt-whisper-native  = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf-hub", "dep:tokenizers"]
+stt-voxtral-native  = ["dep:voxtral-mini-realtime"]
 
 # VAD
 vad-energy = []
@@ -59,6 +60,9 @@ candle-nn           = { version = "0.8", optional = true }
 candle-transformers = { version = "0.8", optional = true }
 hf-hub              = { version = "0.3", optional = true }
 tokenizers          = { version = "0.20", optional = true }
+
+# STT: voxtral-native (optional) — pure Rust Voxtral via Burn ML framework
+voxtral-mini-realtime = { git = "https://github.com/TrevorS/voxtral-mini-realtime-rs", default-features = false, features = ["hub", "native-tokenizer", "wgpu"], optional = true }
 
 # VAD: silero (optional)
 ort = { version = "2.0.0-rc.9", optional = true }

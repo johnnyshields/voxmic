@@ -6,6 +6,8 @@ pub mod voxtral_http;
 pub mod whisper_cpp;
 #[cfg(feature = "stt-whisper-native")]
 pub mod whisper_native;
+#[cfg(feature = "stt-voxtral-native")]
+pub mod voxtral_native;
 
 use std::path::Path;
 
@@ -41,6 +43,12 @@ pub fn create_transcriber(cfg: &SttConfig) -> anyhow::Result<Box<dyn Transcriber
             return Ok(Box::new(whisper_native::WhisperNativeTranscriber::new(cfg)?));
             #[cfg(not(feature = "stt-whisper-native"))]
             anyhow::bail!("stt-whisper-native feature not compiled in");
+        }
+        "voxtral-native" => {
+            #[cfg(feature = "stt-voxtral-native")]
+            return Ok(Box::new(voxtral_native::VoxtralNativeTranscriber::new(cfg)?));
+            #[cfg(not(feature = "stt-voxtral-native"))]
+            anyhow::bail!("stt-voxtral-native feature not compiled in");
         }
         other => anyhow::bail!("Unknown STT backend: {other}"),
     }
