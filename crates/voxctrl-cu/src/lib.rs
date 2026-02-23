@@ -7,11 +7,14 @@ pub mod actions;
 pub mod agent;
 pub mod executor;
 pub mod prompt;
+pub mod mock_provider;
 pub mod provider;
 pub mod screenshot;
 pub mod tree;
 
 pub use actions::{UiAction, UiActionResult};
+pub use agent::{AgentEvent, AgentConfig, AgentResult};
+pub use mock_provider::MockProvider;
 pub use provider::AccessibilityProvider;
 pub use tree::{ElementId, UiNode, UiRect, UiRole, UiState, UiTree};
 

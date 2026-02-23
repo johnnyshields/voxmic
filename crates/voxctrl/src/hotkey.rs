@@ -10,6 +10,12 @@ use voxctrl_core::config::{Config, HotkeyConfig};
 use voxctrl_core::pipeline::Pipeline;
 use voxctrl_core::SharedState;
 
+/// IDs for the registered global hotkeys.
+pub struct HotkeyIds {
+    pub dictation: Option<u32>,
+    pub computer_use: Option<u32>,
+}
+
 /// Parse a shortcut string like "Ctrl+Super+Space" into a `HotKey`.
 pub fn parse_shortcut(s: &str) -> Result<HotKey> {
     let mut modifiers = Modifiers::empty();
@@ -126,7 +132,7 @@ fn parse_key_code(token: &str) -> Result<Code> {
 }
 
 /// Register the configured hotkey, returning `None` if registration fails.
-pub fn setup_hotkeys(cfg: &HotkeyConfig) -> Result<Option<(GlobalHotKeyManager, u32)>> {
+pub fn setup_hotkeys(cfg: &HotkeyConfig) -> Result<Option<(GlobalHotKeyManager, HotkeyIds)>> {
     let hotkey = match parse_shortcut(&cfg.shortcut) {
         Ok(h) => h,
         Err(e) => {
@@ -140,12 +146,11 @@ pub fn setup_hotkeys(cfg: &HotkeyConfig) -> Result<Option<(GlobalHotKeyManager, 
     };
 
     let manager = GlobalHotKeyManager::new().context("create hotkey manager")?;
-    let id = hotkey.id();
+    let dict_id = hotkey.id();
 
     match manager.register(hotkey) {
         Ok(()) => {
-            log::info!("Global hotkey registered: {}", cfg.shortcut);
-            Ok(Some((manager, id)))
+            log::info!("Global dictation hotkey registered: {}", cfg.shortcut);
         }
         Err(e) => {
             log::warn!(
@@ -153,24 +158,55 @@ pub fn setup_hotkeys(cfg: &HotkeyConfig) -> Result<Option<(GlobalHotKeyManager, 
                  use the tray menu or change hotkey.shortcut in config.json.",
                 cfg.shortcut
             );
-            Ok(None)
+            return Ok(None);
         }
     }
+
+    // Register computer-use hotkey if configured
+    let cu_id = if let Some(ref cu_shortcut) = cfg.cu_shortcut {
+        match parse_shortcut(cu_shortcut) {
+            Ok(cu_hk) => {
+                let id = cu_hk.id();
+                match manager.register(cu_hk) {
+                    Ok(()) => {
+                        log::info!("Global computer-use hotkey registered: {}", cu_shortcut);
+                        Some(id)
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to register CU hotkey {:?}: {e}. CU hotkey disabled.",
+                            cu_shortcut
+                        );
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Invalid CU hotkey {:?}: {e}. CU hotkey disabled.", cu_shortcut);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(Some((manager, HotkeyIds { dictation: Some(dict_id), computer_use: cu_id })))
 }
 
 /// Handle a hotkey event: toggle Idle → Recording → Transcribing.
 pub fn handle_hotkey_event(
     event: &GlobalHotKeyEvent,
-    hotkey_id: Option<u32>,
+    ids: &HotkeyIds,
     state: &Arc<SharedState>,
     cfg: &Config,
     pipeline: Arc<Pipeline>,
 ) {
-    if Some(event.id) != hotkey_id {
-        return;
+    if Some(event.id) == ids.dictation {
+        voxctrl_core::recording::toggle_recording(state, cfg, pipeline);
+    } else if Some(event.id) == ids.computer_use {
+        log::info!("Computer-use hotkey pressed");
+        // TODO: Route to CU pipeline when connected
     }
-
-    voxctrl_core::recording::toggle_recording(state, cfg, pipeline);
 }
 
 #[cfg(test)]

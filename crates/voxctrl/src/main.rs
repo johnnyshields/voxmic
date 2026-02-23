@@ -88,7 +88,7 @@ fn run_gui(
         tray: Option<tray_icon::TrayIcon>,
         #[allow(dead_code)]
         hotkey_manager: Option<global_hotkey::GlobalHotKeyManager>,
-        hotkey_id: Option<u32>,
+        hotkey_ids: hotkey::HotkeyIds,
         cfg: config::Config,
         pipeline: Arc<pipeline::Pipeline>,
         _audio_stream: Option<cpal::Stream>,
@@ -127,7 +127,7 @@ fn run_gui(
             if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
                 hotkey::handle_hotkey_event(
                     &event,
-                    self.hotkey_id,
+                    &self.hotkey_ids,
                     &self.state,
                     &self.cfg,
                     self.pipeline.clone(),
@@ -141,16 +141,16 @@ fn run_gui(
     let (tray, menu_ids) = tray::build_tray()?;
     log::info!("Tray icon created");
 
-    let (hotkey_manager, hotkey_id) = match hotkey::setup_hotkeys(&cfg.hotkey) {
-        Ok(Some((mgr, id))) => (Some(mgr), Some(id)),
-        Ok(None) => (None, None),
+    let (hotkey_manager, hotkey_ids) = match hotkey::setup_hotkeys(&cfg.hotkey) {
+        Ok(Some((mgr, ids))) => (Some(mgr), ids),
+        Ok(None) => (None, hotkey::HotkeyIds { dictation: None, computer_use: None }),
         Err(e) => return Err(e),
     };
 
     // Update tray tooltip to reflect pending subsystems
     {
         let stt_pending = pipeline.stt.name().contains("pending");
-        let hotkey_pending = hotkey_id.is_none();
+        let hotkey_pending = hotkey_ids.dictation.is_none();
         if stt_pending || hotkey_pending {
             let mut parts = Vec::new();
             if hotkey_pending { parts.push("hotkey"); }
@@ -164,7 +164,7 @@ fn run_gui(
         state,
         tray: Some(tray),
         hotkey_manager,
-        hotkey_id,
+        hotkey_ids,
         cfg,
         pipeline,
         _audio_stream: Some(audio_stream),
@@ -172,7 +172,7 @@ fn run_gui(
         menu_ids,
     };
 
-    if hotkey_id.is_none() {
+    if app.hotkey_ids.dictation.is_none() {
         log::warn!("Hotkey not active — configure in Settings");
     }
     log::info!("Ready — green=idle  red=recording  amber=transcribing");

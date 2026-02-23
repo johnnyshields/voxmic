@@ -18,6 +18,22 @@ use crate::provider::AccessibilityProvider;
 use crate::screenshot;
 use crate::tree::ElementId;
 
+/// Events emitted during the agent loop for real-time UI updates.
+#[derive(Clone, Debug)]
+pub enum AgentEvent {
+    IterationStart { iteration: u32, max: u32 },
+    LlmResponse { text: String },
+    ToolCall { name: String, input: String },
+    ActionResult { action: String, success: bool, message: String },
+    TreeUpdate { element_count: usize, window_title: String },
+}
+
+fn send_event(tx: &Option<std::sync::mpsc::Sender<AgentEvent>>, event: AgentEvent) {
+    if let Some(tx) = tx {
+        let _ = tx.send(event);
+    }
+}
+
 /// A newtype wrapping an API key string that masks its value in Debug output.
 #[derive(Clone)]
 pub struct ApiKey {
@@ -103,6 +119,16 @@ pub fn run_agent(
     config: &AgentConfig,
     goal: &str,
 ) -> anyhow::Result<AgentResult> {
+    run_agent_streaming(provider, config, goal, None)
+}
+
+/// Run the LLM agent loop, emitting events on `event_tx` for real-time UI updates.
+pub fn run_agent_streaming(
+    provider: &dyn AccessibilityProvider,
+    config: &AgentConfig,
+    goal: &str,
+    event_tx: Option<std::sync::mpsc::Sender<AgentEvent>>,
+) -> anyhow::Result<AgentResult> {
     let mut messages: Vec<Value> = Vec::new();
     let mut actions_performed = Vec::new();
     let mut iterations = 0u32;
@@ -139,6 +165,7 @@ pub fn run_agent(
             });
         }
         iterations += 1;
+        send_event(&event_tx, AgentEvent::IterationStart { iteration: iterations, max: config.max_iterations });
 
         log::info!("Agent iteration {}/{}", iterations, config.max_iterations);
 
@@ -150,6 +177,15 @@ pub fn run_agent(
             .as_array()
             .cloned()
             .unwrap_or_default();
+
+        // Emit LlmResponse events for any text blocks
+        for block in &content {
+            if block["type"].as_str() == Some("text") {
+                if let Some(text) = block["text"].as_str() {
+                    send_event(&event_tx, AgentEvent::LlmResponse { text: text.to_string() });
+                }
+            }
+        }
 
         // Collect the assistant response for conversation history
         messages.push(serde_json::json!({
@@ -189,6 +225,11 @@ pub fn run_agent(
 
             log::info!("Agent tool call: {}({})", tool_name, input);
 
+            send_event(&event_tx, AgentEvent::ToolCall {
+                name: tool_name.to_string(),
+                input: input.to_string(),
+            });
+
             let action = parse_tool_call(tool_name, input);
             let result = match &action {
                 Ok(ui_action) => {
@@ -205,6 +246,12 @@ pub fn run_agent(
 
             log::info!("  → {}: {}", if result.success { "ok" } else { "err" }, result.message);
 
+            send_event(&event_tx, AgentEvent::ActionResult {
+                action: format!("{}", tool_name),
+                success: result.success,
+                message: result.message.clone(),
+            });
+
             tool_results.push(serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": tool_id,
@@ -220,6 +267,11 @@ pub fn run_agent(
         // Re-capture UI tree after actions
         let updated_tree = provider.get_focused_tree()?;
         let updated_tree_json = updated_tree.to_llm_json(config.max_tree_depth);
+
+        send_event(&event_tx, AgentEvent::TreeUpdate {
+            element_count: updated_tree.element_count,
+            window_title: updated_tree.window_title.clone(),
+        });
 
         // Add updated tree observation
         tool_results.push(serde_json::json!({
