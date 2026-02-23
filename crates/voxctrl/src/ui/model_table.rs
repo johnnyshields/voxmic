@@ -30,6 +30,7 @@ const VAD_BACKENDS: &[(&str, &str)] = &[
     ("silero", "Silero VAD v5"),
 ];
 
+#[allow(dead_code)] // used only when cu-* features enabled
 const CU_PROVIDER_TYPES: &[(&str, &str)] = &[
     ("anthropic", "Anthropic (Remote)"),
     ("local", "Local LLM"),
