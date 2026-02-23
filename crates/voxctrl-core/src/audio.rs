@@ -10,10 +10,11 @@ use cpal::{Device, SampleRate, StreamConfig};
 use crate::config::Config;
 use crate::{AppStatus, SharedState};
 
-/// Find an input device matching `pattern` and build a mono `StreamConfig` at
-/// the requested sample rate, falling back to the device default when the exact
-/// rate isn't supported.  Returns `(device, config, actual_sample_rate)`.
-fn resolve_device_and_config(pattern: &str, sample_rate: u32) -> Result<(Device, StreamConfig, u32)> {
+/// Find an input device matching `pattern` and build a `StreamConfig` at the
+/// requested sample rate (mono if supported), falling back to the device
+/// default when the exact rate isn't supported.
+/// Returns `(device, config, actual_sample_rate, channels)`.
+fn resolve_device_and_config(pattern: &str, sample_rate: u32) -> Result<(Device, StreamConfig, u32, u16)> {
     let host = cpal::default_host();
     let pat = pattern.to_lowercase();
     let device = host
@@ -47,30 +48,45 @@ fn resolve_device_and_config(pattern: &str, sample_rate: u32) -> Result<(Device,
                 .context("No default input config")?;
             let device_name = device.name().unwrap_or_else(|_| "<unknown>".into());
             log::warn!(
-                "{}Hz not supported by '{}'; falling back to {}Hz",
+                "{}Hz not supported by '{}'; falling back to {}Hz, {}ch",
                 sample_rate,
                 device_name,
                 default.sample_rate().0,
+                default.channels(),
             );
             default.into()
         }
     };
 
     let actual_rate = stream_config.sample_rate.0;
-    Ok((device, stream_config, actual_rate))
+    let channels = stream_config.channels;
+    Ok((device, stream_config, actual_rate, channels))
+}
+
+/// Downmix interleaved multi-channel audio to mono by averaging channels per frame.
+#[inline]
+fn downmix_to_mono(data: &[f32], channels: u16) -> Vec<f32> {
+    if channels <= 1 {
+        return data.to_vec();
+    }
+    let ch = channels as usize;
+    data.chunks_exact(ch)
+        .map(|frame| frame.iter().sum::<f32>() / ch as f32)
+        .collect()
 }
 
 /// Start the always-on audio capture stream.
 pub fn start_capture(state: Arc<SharedState>, cfg: &Config) -> Result<cpal::Stream> {
-    let (device, stream_config, actual_rate) =
+    let (device, stream_config, actual_rate, channels) =
         resolve_device_and_config(&cfg.audio.device_pattern, cfg.audio.sample_rate)?;
 
     let device_name = device.name().unwrap_or_else(|_| "<unknown>".into());
     log::info!("Audio device: {device_name}");
     log::info!(
-        "Stream: {}Hz, {}ch",
+        "Stream: {}Hz, {}ch{}",
         actual_rate,
-        stream_config.channels,
+        channels,
+        if channels > 1 { " (downmixing to mono)" } else { "" },
     );
 
     let state_cb = Arc::clone(&state);
@@ -84,7 +100,12 @@ pub fn start_capture(state: Arc<SharedState>, cfg: &Config) -> Result<cpal::Stre
                 };
                 if is_recording {
                     let mut chunks = state_cb.chunks.lock().unwrap();
-                    chunks.extend_from_slice(data);
+                    if channels <= 1 {
+                        chunks.extend_from_slice(data);
+                    } else {
+                        let mono = downmix_to_mono(data, channels);
+                        chunks.extend_from_slice(&mono);
+                    }
                 }
             },
             |err| log::error!("Audio capture error: {err}"),
@@ -110,7 +131,7 @@ pub fn list_input_devices() -> Vec<String> {
 
 /// Start a test audio capture stream that sends RMS levels and raw samples.
 ///
-/// `test_chunks` receives raw f32 samples when `recording` is true.
+/// `test_chunks` receives mono f32 samples when `recording` is true.
 /// Returns `(stream, actual_sample_rate)`.
 pub fn start_test_capture(
     device_pattern: &str,
@@ -119,25 +140,33 @@ pub fn start_test_capture(
     test_chunks: Arc<std::sync::Mutex<Vec<f32>>>,
     recording: Arc<AtomicBool>,
 ) -> Result<(cpal::Stream, u32)> {
-    let (device, stream_config, actual_rate) =
+    let (device, stream_config, actual_rate, channels) =
         resolve_device_and_config(device_pattern, sample_rate)?;
 
-    log::info!("Test capture: device={:?}, actual_rate={}Hz", device.name(), actual_rate);
+    log::info!(
+        "Test capture: device={:?}, actual_rate={}Hz, channels={}",
+        device.name(), actual_rate, channels
+    );
 
     let stream = device
         .build_input_stream(
             &stream_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                // Compute RMS for level meter
+                // Compute RMS for level meter (use raw data, all channels)
                 if !data.is_empty() {
                     let sum: f32 = data.iter().map(|s| s * s).sum();
                     let rms = (sum / data.len() as f32).sqrt();
                     let _ = level_tx.send(rms);
                 }
-                // Record raw samples if recording flag is set
+                // Record mono samples if recording flag is set
                 if recording.load(std::sync::atomic::Ordering::Relaxed) {
                     let mut chunks = test_chunks.lock().unwrap();
-                    chunks.extend_from_slice(data);
+                    if channels <= 1 {
+                        chunks.extend_from_slice(data);
+                    } else {
+                        let mono = downmix_to_mono(data, channels);
+                        chunks.extend_from_slice(&mono);
+                    }
                 }
             },
             |err| log::error!("Test audio capture error: {err}"),
