@@ -8403,6 +8403,7 @@ name = "voxctrl-stt"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "audioadapter-buffers",
  "burn",
  "byteorder",
  "candle-core 0.8.4",
@@ -8413,6 +8414,7 @@ dependencies = [
  "hf-hub 0.3.2",
  "hound",
  "log",
+ "rubato",
  "serde_json",
  "tokenizers 0.20.4",
  "voxctrl-core",

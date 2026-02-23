@@ -369,23 +369,36 @@ fn build_token_mask(suppressed: &[u32], vocab_size: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Resample audio from `from_rate` to `to_rate` using linear interpolation.
+/// Resample audio from `from_rate` to `to_rate` using rubato's FFT resampler
+/// with proper polyphase anti-aliasing.
 fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     if from_rate == to_rate || samples.is_empty() {
         return samples.to_vec();
     }
-    let ratio = from_rate as f64 / to_rate as f64;
-    let out_len = (samples.len() as f64 / ratio) as usize;
-    let mut out = Vec::with_capacity(out_len);
-    for i in 0..out_len {
-        let src_idx = i as f64 * ratio;
-        let idx0 = src_idx as usize;
-        let frac = (src_idx - idx0 as f64) as f32;
-        let s0 = samples[idx0];
-        let s1 = if idx0 + 1 < samples.len() { samples[idx0 + 1] } else { s0 };
-        out.push(s0 + frac * (s1 - s0));
-    }
-    out
+    use audioadapter_buffers::owned::InterleavedOwned;
+    use rubato::{Fft, FixedSync, Resampler};
+
+    let mut resampler = Fft::<f32>::new(
+        from_rate as usize,
+        to_rate as usize,
+        1024, // chunk size
+        2,    // sub-chunks
+        1,    // channels (mono)
+        FixedSync::Input,
+    )
+    .expect("failed to create resampler");
+
+    let output_len = resampler.process_all_needed_output_len(samples.len());
+    let input_buf = InterleavedOwned::new_from(samples.to_vec(), 1, samples.len())
+        .expect("failed to create input buffer");
+    let mut output_buf = InterleavedOwned::new(0.0f32, 1, output_len);
+
+    let (_, actual_output_len) = resampler
+        .process_all_into_buffer(&input_buf, &mut output_buf, samples.len(), None)
+        .expect("resampler failed");
+
+    let output = output_buf.take_data();
+    output[..actual_output_len].to_vec()
 }
 
 fn audio_stats(data: &[f32]) -> (f32, f32, f32) {
@@ -424,25 +437,31 @@ mod tests {
 
     #[test]
     fn resample_downsample_2x() {
-        // 32 kHz -> 16 kHz: output should be half the length.
-        let input: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        // 32 kHz -> 16 kHz: output should be approximately half the length.
+        // Use a larger input so the FFT resampler has enough data to process.
+        let input: Vec<f32> = (0..32000).map(|i| (i as f32 / 32000.0).sin()).collect();
         let out = resample(&input, 32000, 16000);
-        assert_eq!(out.len(), 50);
-        // First sample is always sample[0].
-        assert!((out[0] - 0.0).abs() < 1e-6);
-        // Second output sample should correspond to input index 2.0 (linear interp).
-        assert!((out[1] - 2.0).abs() < 1e-4);
+        let expected_len = 16000i64;
+        assert!(
+            (out.len() as i64 - expected_len).abs() < 100,
+            "Expected ~{} samples, got {}",
+            expected_len,
+            out.len()
+        );
     }
 
     #[test]
     fn resample_upsample_2x() {
-        // 8 kHz -> 16 kHz: output should be double the length.
-        let input = vec![0.0, 1.0, 2.0, 3.0];
+        // 8 kHz -> 16 kHz: output should be approximately double the length.
+        let input: Vec<f32> = (0..8000).map(|i| (i as f32 / 8000.0).sin()).collect();
         let out = resample(&input, 8000, 16000);
-        assert_eq!(out.len(), 8);
-        assert!((out[0] - 0.0).abs() < 1e-6);
-        // Midpoint between input[0] and input[1] should be ~0.5.
-        assert!((out[1] - 0.5).abs() < 1e-4);
+        let expected_len = 16000i64;
+        assert!(
+            (out.len() as i64 - expected_len).abs() < 100,
+            "Expected ~{} samples, got {}",
+            expected_len,
+            out.len()
+        );
     }
 
     // ── audio_stats tests ────────────────────────────────────────────────
