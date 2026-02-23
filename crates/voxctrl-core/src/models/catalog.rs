@@ -9,6 +9,7 @@ pub enum ModelBackend {
 pub enum ModelCategory {
     Stt,
     Vad,
+    ComputerUse,
 }
 
 impl std::fmt::Display for ModelCategory {
@@ -16,6 +17,7 @@ impl std::fmt::Display for ModelCategory {
         match self {
             ModelCategory::Stt => write!(f, "STT"),
             ModelCategory::Vad => write!(f, "VAD"),
+            ModelCategory::ComputerUse => write!(f, "CU"),
         }
     }
 }

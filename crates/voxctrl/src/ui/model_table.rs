@@ -30,6 +30,11 @@ const VAD_BACKENDS: &[(&str, &str)] = &[
     ("silero", "Silero VAD v5"),
 ];
 
+const CU_PROVIDER_TYPES: &[(&str, &str)] = &[
+    ("anthropic", "Anthropic (Remote)"),
+    ("local", "Local LLM"),
+];
+
 fn lookup_label(options: &'static [(&str, &str)], value: &str) -> &'static str {
     options
         .iter()
@@ -251,6 +256,19 @@ pub struct SettingsApp {
     models_directory: Option<PathBuf>,
     model_paths: HashMap<String, PathBuf>,
     saved_flash: Option<std::time::Instant>,
+    // Computer Use settings (fields used when cu-* features enabled)
+    #[allow(dead_code)]
+    cu_provider_type: String,
+    #[allow(dead_code)]
+    cu_model: String,
+    #[allow(dead_code)]
+    cu_api_base_url: String,
+    #[allow(dead_code)]
+    cu_max_iterations: String,
+    #[allow(dead_code)]
+    cu_max_tree_depth: String,
+    #[allow(dead_code)]
+    cu_include_screenshots: bool,
     // Hotkey capture
     capture_state: CaptureState,
     capture_target: CaptureTarget,
@@ -325,6 +343,12 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
         models_directory: cfg.models.models_directory.clone(),
         model_paths: cfg.models.model_paths.clone(),
         saved_flash: None,
+        cu_provider_type: cfg.action.cu_provider_type.clone(),
+        cu_model: cfg.action.cu_model.clone().unwrap_or_default(),
+        cu_api_base_url: cfg.action.cu_api_base_url.clone().unwrap_or_default(),
+        cu_max_iterations: cfg.action.cu_max_iterations.map_or(String::new(), |v| v.to_string()),
+        cu_max_tree_depth: cfg.action.cu_max_tree_depth.map_or(String::new(), |v| v.to_string()),
+        cu_include_screenshots: cfg.action.cu_include_screenshots.unwrap_or(false),
         capture_state: CaptureState::Idle,
         capture_target: CaptureTarget::Dictation,
         hotkey_include_super: include_super,
@@ -339,7 +363,7 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([650.0, 520.0])
+            .with_inner_size([650.0, 620.0])
             .with_title("voxctrl — Settings"),
         ..Default::default()
     };
@@ -473,103 +497,59 @@ impl eframe::App for SettingsApp {
 
 impl SettingsApp {
     fn draw_settings_tab(&mut self, ui: &mut egui::Ui) {
-        // Build a temporary config to check which models are required
         let required_stt = self.required_stt_model_id();
         let required_vad = self.required_vad_model_id();
         let stt_missing = required_stt.as_ref().map_or(false, |id| !self.is_model_downloaded(id));
         let vad_missing = required_vad.as_ref().map_or(false, |id| !self.is_model_downloaded(id));
 
-        egui::Grid::new("settings_grid")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
-            .show(ui, |ui| {
-                ui.label("Mic Input");
-                egui::ComboBox::from_id_salt("mic_input")
-                    .selected_text(if self.selected_device.is_empty() {
-                        "Default"
-                    } else {
-                        &self.selected_device
-                    })
-                    .show_ui(ui, |ui| {
-                        for name in &self.available_devices {
-                            ui.selectable_value(
-                                &mut self.selected_device,
-                                name.clone(),
-                                name.as_str(),
-                            );
-                        }
-                    });
-                ui.end_row();
-
-                // ── Hotkey capture widget ─────────────────────────────
-                ui.label("Hotkey");
-                ui.horizontal(|ui| {
-                    if self.capture_state == CaptureState::Listening && self.capture_target == CaptureTarget::Dictation {
-                        let mods = ui.ctx().input(|i| i.modifiers);
-                        let mut parts: Vec<&str> = Vec::new();
-                        if mods.ctrl || mods.command {
-                            parts.push("Ctrl");
-                        }
-                        if mods.alt {
-                            parts.push("Alt");
-                        }
-                        if mods.shift {
-                            parts.push("Shift");
-                        }
-                        if self.hotkey_include_super {
-                            parts.push("Super");
-                        }
-                        let text = if parts.is_empty() {
-                            "Press keys...".to_string()
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // ── Input section ──
+            ui.group(|ui| {
+                ui.strong("Input");
+                egui::Grid::new("settings_input").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    ui.label("Mic Input");
+                    egui::ComboBox::from_id_salt("mic_input")
+                        .selected_text(if self.selected_device.is_empty() {
+                            "Default"
                         } else {
-                            format!("{}+...", parts.join("+"))
-                        };
-                        ui.add(egui::Button::new(
-                            egui::RichText::new(text).color(egui::Color32::YELLOW),
-                        ));
-                        if ui.button("Cancel").clicked() {
-                            self.capture_state = CaptureState::Idle;
-                        }
-                    } else {
-                        let label = if self.hotkey_dict_shortcut.is_empty() {
-                            "Click to set hotkey..."
-                        } else {
-                            &self.hotkey_dict_shortcut
-                        };
-                        let enabled = self.capture_state == CaptureState::Idle;
-                        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                            self.capture_state = CaptureState::Listening;
-                            self.capture_target = CaptureTarget::Dictation;
-                        }
-                        if !self.hotkey_dict_shortcut.is_empty() && ui.small_button("\u{2715}").clicked()
-                        {
-                            self.hotkey_dict_shortcut.clear();
-                        }
-                    }
+                            &self.selected_device
+                        })
+                        .show_ui(ui, |ui| {
+                            for name in &self.available_devices {
+                                ui.selectable_value(
+                                    &mut self.selected_device,
+                                    name.clone(),
+                                    name.as_str(),
+                                );
+                            }
+                        });
+                    ui.end_row();
                 });
-                ui.end_row();
+            });
 
-                // ── Super checkbox ────────────────────────────────────
-                ui.label("");
-                let old_super = self.hotkey_include_super;
-                ui.checkbox(&mut self.hotkey_include_super, "Include Super/Win key");
-                if self.hotkey_include_super != old_super && !self.hotkey_dict_shortcut.is_empty() {
-                    self.toggle_super_in_shortcut();
-                }
-                ui.end_row();
+            ui.add_space(4.0);
 
-                // ── Computer Use Hotkey ─────────────────────────────
-                #[cfg(any(feature = "cu-windows", feature = "cu-macos", feature = "cu-linux"))]
-                {
-                    ui.label("CU Hotkey");
+            // ── Hotkeys section ──
+            ui.group(|ui| {
+                ui.strong("Hotkeys");
+                egui::Grid::new("settings_hotkeys").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    ui.label("Dictation");
                     ui.horizontal(|ui| {
-                        if self.capture_state == CaptureState::Listening && self.capture_target == CaptureTarget::ComputerUse {
+                        if self.capture_state == CaptureState::Listening && self.capture_target == CaptureTarget::Dictation {
                             let mods = ui.ctx().input(|i| i.modifiers);
                             let mut parts: Vec<&str> = Vec::new();
-                            if mods.ctrl || mods.command { parts.push("Ctrl"); }
-                            if mods.alt { parts.push("Alt"); }
-                            if mods.shift { parts.push("Shift"); }
-                            if self.hotkey_cu_include_super { parts.push("Super"); }
+                            if mods.ctrl || mods.command {
+                                parts.push("Ctrl");
+                            }
+                            if mods.alt {
+                                parts.push("Alt");
+                            }
+                            if mods.shift {
+                                parts.push("Shift");
+                            }
+                            if self.hotkey_include_super {
+                                parts.push("Super");
+                            }
                             let text = if parts.is_empty() {
                                 "Press keys...".to_string()
                             } else {
@@ -582,120 +562,197 @@ impl SettingsApp {
                                 self.capture_state = CaptureState::Idle;
                             }
                         } else {
-                            let label = if self.hotkey_cu_shortcut.is_empty() {
-                                "Click to set CU hotkey..."
+                            let label = if self.hotkey_dict_shortcut.is_empty() {
+                                "Click to set hotkey..."
                             } else {
-                                &self.hotkey_cu_shortcut
+                                &self.hotkey_dict_shortcut
                             };
                             let enabled = self.capture_state == CaptureState::Idle;
                             if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                                 self.capture_state = CaptureState::Listening;
-                                self.capture_target = CaptureTarget::ComputerUse;
+                                self.capture_target = CaptureTarget::Dictation;
                             }
-                            if !self.hotkey_cu_shortcut.is_empty() && ui.small_button("\u{2715}").clicked() {
-                                self.hotkey_cu_shortcut.clear();
+                            if !self.hotkey_dict_shortcut.is_empty() && ui.small_button("\u{2715}").clicked()
+                            {
+                                self.hotkey_dict_shortcut.clear();
                             }
                         }
                     });
                     ui.end_row();
 
                     ui.label("");
-                    ui.checkbox(&mut self.hotkey_cu_include_super, "Include Super/Win key (CU)");
+                    let old_super = self.hotkey_include_super;
+                    ui.checkbox(&mut self.hotkey_include_super, "Include Super/Win key");
+                    if self.hotkey_include_super != old_super && !self.hotkey_dict_shortcut.is_empty() {
+                        self.toggle_super_in_shortcut();
+                    }
                     ui.end_row();
-                }
 
-                // ── STT backend ───────────────────────────────────────
-                ui.label("STT Backend");
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("stt_backend")
-                        .selected_text(lookup_label(STT_BACKENDS, &self.stt_backend))
-                        .show_ui(ui, |ui| {
-                            for &(value, label) in STT_BACKENDS {
-                                ui.selectable_value(&mut self.stt_backend, value.into(), label);
+                    #[cfg(any(feature = "cu-windows", feature = "cu-macos", feature = "cu-linux"))]
+                    {
+                        ui.label("CU Hotkey");
+                        ui.horizontal(|ui| {
+                            if self.capture_state == CaptureState::Listening && self.capture_target == CaptureTarget::ComputerUse {
+                                let mods = ui.ctx().input(|i| i.modifiers);
+                                let mut parts: Vec<&str> = Vec::new();
+                                if mods.ctrl || mods.command { parts.push("Ctrl"); }
+                                if mods.alt { parts.push("Alt"); }
+                                if mods.shift { parts.push("Shift"); }
+                                if self.hotkey_cu_include_super { parts.push("Super"); }
+                                let text = if parts.is_empty() {
+                                    "Press keys...".to_string()
+                                } else {
+                                    format!("{}+...", parts.join("+"))
+                                };
+                                ui.add(egui::Button::new(
+                                    egui::RichText::new(text).color(egui::Color32::YELLOW),
+                                ));
+                                if ui.button("Cancel").clicked() {
+                                    self.capture_state = CaptureState::Idle;
+                                }
+                            } else {
+                                let label = if self.hotkey_cu_shortcut.is_empty() {
+                                    "Click to set CU hotkey..."
+                                } else {
+                                    &self.hotkey_cu_shortcut
+                                };
+                                let enabled = self.capture_state == CaptureState::Idle;
+                                if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                                    self.capture_state = CaptureState::Listening;
+                                    self.capture_target = CaptureTarget::ComputerUse;
+                                }
+                                if !self.hotkey_cu_shortcut.is_empty() && ui.small_button("\u{2715}").clicked() {
+                                    self.hotkey_cu_shortcut.clear();
+                                }
                             }
                         });
-                    if stt_missing {
-                        ui.colored_label(egui::Color32::RED, "model not downloaded");
+                        ui.end_row();
+
+                        ui.label("");
+                        ui.checkbox(&mut self.hotkey_cu_include_super, "Include Super/Win key (CU)");
+                        ui.end_row();
                     }
                 });
-                ui.end_row();
-
-                if self.stt_backend.starts_with("whisper") {
-                    ui.label("Whisper Model");
-                    egui::ComboBox::from_id_salt("whisper_model")
-                        .selected_text(lookup_label(WHISPER_MODELS, &self.whisper_model))
-                        .show_ui(ui, |ui| {
-                            for &(value, label) in WHISPER_MODELS {
-                                ui.selectable_value(
-                                    &mut self.whisper_model,
-                                    value.into(),
-                                    label,
-                                );
-                            }
-                        });
-                    ui.end_row();
-                }
-
-                // ── VAD backend ───────────────────────────────────────
-                ui.label("VAD Backend");
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("vad_backend")
-                        .selected_text(lookup_label(VAD_BACKENDS, &self.vad_backend))
-                        .show_ui(ui, |ui| {
-                            for &(value, label) in VAD_BACKENDS {
-                                ui.selectable_value(&mut self.vad_backend, value.into(), label);
-                            }
-                        });
-                    if vad_missing {
-                        ui.colored_label(egui::Color32::RED, "model not downloaded");
-                    }
-                });
-                ui.end_row();
-
-                ui.label("Hugging Face Token");
-                ui.horizontal(|ui| {
-                    let field = egui::TextEdit::singleline(&mut self.hf_token)
-                        .password(!self.show_hf_token)
-                        .desired_width(200.0);
-                    ui.add(field);
-                    if ui.selectable_label(self.show_hf_token, "Show").clicked() {
-                        self.show_hf_token = !self.show_hf_token;
-                    }
-                });
-                ui.end_row();
-
-                ui.label("Models Directory");
-                ui.horizontal(|ui| {
-                    let display = match &self.models_directory {
-                        Some(p) => p.display().to_string(),
-                        None => "Default (HuggingFace cache)".into(),
-                    };
-                    ui.label(display);
-                    if ui.small_button("Browse\u{2026}").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            self.models_directory = Some(path);
-                        }
-                    }
-                    if self.models_directory.is_some() && ui.small_button("Reset").clicked() {
-                        self.models_directory = None;
-                    }
-                });
-                ui.end_row();
             });
 
-        ui.add_space(12.0);
+            ui.add_space(4.0);
 
-        if ui.button("  Save  ").clicked() {
-            self.save_config();
-        }
+            // ── Speech-to-Text section ──
+            ui.group(|ui| {
+                ui.strong("Speech-to-Text");
+                egui::Grid::new("settings_stt").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    ui.label("STT Backend");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("stt_backend")
+                            .selected_text(lookup_label(STT_BACKENDS, &self.stt_backend))
+                            .show_ui(ui, |ui| {
+                                for &(value, label) in STT_BACKENDS {
+                                    ui.selectable_value(&mut self.stt_backend, value.into(), label);
+                                }
+                            });
+                        if stt_missing {
+                            ui.colored_label(egui::Color32::RED, "model not downloaded");
+                        }
+                    });
+                    ui.end_row();
 
-        if let Some(t) = self.saved_flash {
-            if t.elapsed() < std::time::Duration::from_secs(3) {
-                ui.colored_label(egui::Color32::GREEN, "Saved!");
-            } else {
-                self.saved_flash = None;
+                    if self.stt_backend.starts_with("whisper") {
+                        ui.label("Whisper Model");
+                        egui::ComboBox::from_id_salt("whisper_model")
+                            .selected_text(lookup_label(WHISPER_MODELS, &self.whisper_model))
+                            .show_ui(ui, |ui| {
+                                for &(value, label) in WHISPER_MODELS {
+                                    ui.selectable_value(
+                                        &mut self.whisper_model,
+                                        value.into(),
+                                        label,
+                                    );
+                                }
+                            });
+                        ui.end_row();
+                    }
+                });
+            });
+
+            ui.add_space(4.0);
+
+            // ── Voice Activity Detection section ──
+            ui.group(|ui| {
+                ui.strong("Voice Activity Detection");
+                egui::Grid::new("settings_vad").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    ui.label("VAD Backend");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("vad_backend")
+                            .selected_text(lookup_label(VAD_BACKENDS, &self.vad_backend))
+                            .show_ui(ui, |ui| {
+                                for &(value, label) in VAD_BACKENDS {
+                                    ui.selectable_value(&mut self.vad_backend, value.into(), label);
+                                }
+                            });
+                        if vad_missing {
+                            ui.colored_label(egui::Color32::RED, "model not downloaded");
+                        }
+                    });
+                    ui.end_row();
+                });
+            });
+
+            ui.add_space(4.0);
+
+            // ── Computer Use section (feature-gated) ──
+            #[cfg(any(feature = "cu-windows", feature = "cu-macos", feature = "cu-linux"))]
+            {
+                ui.group(|ui| {
+                    ui.strong("Computer Use");
+                    egui::Grid::new("settings_cu").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                        ui.label("Provider");
+                        egui::ComboBox::from_id_salt("cu_provider")
+                            .selected_text(lookup_label(CU_PROVIDER_TYPES, &self.cu_provider_type))
+                            .show_ui(ui, |ui| {
+                                for &(value, label) in CU_PROVIDER_TYPES {
+                                    ui.selectable_value(&mut self.cu_provider_type, value.into(), label);
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Model");
+                        ui.add(egui::TextEdit::singleline(&mut self.cu_model).desired_width(200.0).hint_text("claude-sonnet-4-20250514"));
+                        ui.end_row();
+
+                        ui.label("API Base URL");
+                        ui.add(egui::TextEdit::singleline(&mut self.cu_api_base_url).desired_width(200.0).hint_text("https://api.anthropic.com"));
+                        ui.end_row();
+
+                        ui.label("Max Iterations");
+                        ui.add(egui::TextEdit::singleline(&mut self.cu_max_iterations).desired_width(60.0).hint_text("10"));
+                        ui.end_row();
+
+                        ui.label("Max Tree Depth");
+                        ui.add(egui::TextEdit::singleline(&mut self.cu_max_tree_depth).desired_width(60.0).hint_text("8"));
+                        ui.end_row();
+
+                        ui.label("Screenshots");
+                        ui.checkbox(&mut self.cu_include_screenshots, "Include screenshots in agent context");
+                        ui.end_row();
+                    });
+                });
+
+                ui.add_space(4.0);
             }
-        }
+
+            // Save button + flash
+            if ui.button("  Save  ").clicked() {
+                self.save_config();
+            }
+
+            if let Some(t) = self.saved_flash {
+                if t.elapsed() < std::time::Duration::from_secs(3) {
+                    ui.colored_label(egui::Color32::GREEN, "Saved!");
+                } else {
+                    self.saved_flash = None;
+                }
+            }
+        });
     }
 
     fn required_stt_model_id(&self) -> Option<String> {
@@ -754,6 +811,12 @@ impl SettingsApp {
         cfg.stt.backend = self.stt_backend.clone();
         cfg.stt.whisper_model = self.whisper_model.clone();
         cfg.vad.backend = self.vad_backend.clone();
+        cfg.action.cu_provider_type = self.cu_provider_type.clone();
+        cfg.action.cu_model = if self.cu_model.is_empty() { None } else { Some(self.cu_model.clone()) };
+        cfg.action.cu_api_base_url = if self.cu_api_base_url.is_empty() { None } else { Some(self.cu_api_base_url.clone()) };
+        cfg.action.cu_max_iterations = self.cu_max_iterations.parse::<u32>().ok();
+        cfg.action.cu_max_tree_depth = self.cu_max_tree_depth.parse::<usize>().ok();
+        cfg.action.cu_include_screenshots = Some(self.cu_include_screenshots);
         cfg.models.models_directory = self.models_directory.clone();
         cfg.models.model_paths = self.model_paths.clone();
         config::save_config(&cfg);
@@ -1357,19 +1420,52 @@ fn transcribe_chunks(
 
 impl SettingsApp {
     fn draw_models_tab(&mut self, ui: &mut egui::Ui) {
-        // Sub-tab bar for model categories
+        // HF Token + Models Directory at top
+        ui.group(|ui| {
+            egui::Grid::new("models_config").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                ui.label("Hugging Face Token");
+                ui.horizontal(|ui| {
+                    let field = egui::TextEdit::singleline(&mut self.hf_token)
+                        .password(!self.show_hf_token)
+                        .desired_width(200.0);
+                    ui.add(field);
+                    if ui.selectable_label(self.show_hf_token, "Show").clicked() {
+                        self.show_hf_token = !self.show_hf_token;
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Models Directory");
+                ui.horizontal(|ui| {
+                    let display = match &self.models_directory {
+                        Some(p) => p.display().to_string(),
+                        None => "Default (HuggingFace cache)".into(),
+                    };
+                    ui.label(display);
+                    if ui.small_button("Browse\u{2026}").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.models_directory = Some(path);
+                        }
+                    }
+                    if self.models_directory.is_some() && ui.small_button("Reset").clicked() {
+                        self.models_directory = None;
+                    }
+                });
+                ui.end_row();
+            });
+        });
+        ui.add_space(4.0);
+
+        // Sub-tab bar with 3 tabs
         ui.horizontal(|ui| {
-            if ui
-                .selectable_label(self.model_tab == ModelCategory::Stt, "STT Models")
-                .clicked()
-            {
+            if ui.selectable_label(self.model_tab == ModelCategory::Stt, "STT Models").clicked() {
                 self.model_tab = ModelCategory::Stt;
             }
-            if ui
-                .selectable_label(self.model_tab == ModelCategory::Vad, "VAD Models")
-                .clicked()
-            {
+            if ui.selectable_label(self.model_tab == ModelCategory::Vad, "VAD Models").clicked() {
                 self.model_tab = ModelCategory::Vad;
+            }
+            if ui.selectable_label(self.model_tab == ModelCategory::ComputerUse, "CU Models").clicked() {
+                self.model_tab = ModelCategory::ComputerUse;
             }
         });
         ui.separator();
@@ -1494,6 +1590,14 @@ impl SettingsApp {
                 }
             });
 
+        if filtered.is_empty() {
+            ui.colored_label(egui::Color32::GRAY, match self.model_tab {
+                ModelCategory::Stt => "No STT models in catalog",
+                ModelCategory::Vad => "No VAD models in catalog",
+                ModelCategory::ComputerUse => "No CU models in catalog yet",
+            });
+        }
+
         // Handle deferred folder picker (outside grid / lock scope)
         if let Some(model_id) = browse_model_id {
             if let Some(path) = rfd::FileDialog::new().pick_folder() {
@@ -1503,15 +1607,6 @@ impl SettingsApp {
 
         // Footer
         ui.separator();
-        let dir_label = match &self.models_directory {
-            Some(p) => format!("Models Directory: {}", p.display()),
-            None => match voxctrl_core::models::cache_scanner::hf_cache_dir() {
-                Some(cache_dir) => format!("Models Directory: {}", cache_dir.display()),
-                None => "Models Directory: (unknown)".into(),
-            },
-        };
-        ui.label(dir_label);
-
         if total_bytes > 0 {
             ui.label(format!("Total disk usage: {}", format_size(total_bytes)));
         }
