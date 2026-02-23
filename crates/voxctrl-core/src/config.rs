@@ -153,6 +153,33 @@ pub struct ModelsConfig {
     pub model_paths: HashMap<String, PathBuf>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuConfig {
+    /// GPU backend: "auto", "cuda", "zluda", "directml", "wgpu", "cpu"
+    #[serde(default = "default_gpu_backend")]
+    pub backend: String,
+    /// CUDA/ZLUDA device ordinal.
+    #[serde(default)]
+    pub device_id: u32,
+    /// Directory for ZLUDA DLLs (default: `zluda/` next to exe).
+    #[serde(default)]
+    pub zluda_dir: Option<PathBuf>,
+    /// Auto-download ZLUDA when AMD GPU detected (default: true).
+    #[serde(default = "default_zluda_auto_download")]
+    pub zluda_auto_download: bool,
+}
+
+impl Default for GpuConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_gpu_backend(),
+            device_id: 0,
+            zluda_dir: None,
+            zluda_auto_download: default_zluda_auto_download(),
+        }
+    }
+}
+
 // ── Top-level config ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +198,8 @@ pub struct Config {
     pub hotkey: HotkeyConfig,
     #[serde(default)]
     pub models: ModelsConfig,
+    #[serde(default)]
+    pub gpu: GpuConfig,
 }
 
 impl Default for Config {
@@ -183,6 +212,7 @@ impl Default for Config {
             audio: AudioConfig::default(),
             hotkey: HotkeyConfig::default(),
             models: ModelsConfig::default(),
+            gpu: GpuConfig::default(),
         }
     }
 }
@@ -203,6 +233,8 @@ fn default_hotkey_shortcut() -> String { "Ctrl+Super+Space".into() }
 fn default_device_pattern() -> String { "DJI".into() }
 fn default_sample_rate() -> u32 { 16000 }
 fn default_chunk_duration_ms() -> u32 { 100 }
+fn default_gpu_backend() -> String { "auto".into() }
+fn default_zluda_auto_download() -> bool { true }
 
 // ── Load / save ────────────────────────────────────────────────────────────
 
@@ -307,6 +339,7 @@ fn load_legacy_config(contents: &str) -> Config {
         },
         hotkey: HotkeyConfig::default(),
         models: ModelsConfig::default(),
+        gpu: GpuConfig::default(),
     }
 }
 
@@ -352,6 +385,15 @@ mod tests {
         assert_eq!(cfg.audio.chunk_duration_ms, 100);
         assert_eq!(cfg.stt.whisper_model, "small");
         assert_eq!(cfg.vad.energy_threshold, 0.015);
+    }
+
+    #[test]
+    fn test_gpu_config_defaults() {
+        let cfg = Config::default();
+        assert_eq!(cfg.gpu.backend, "auto");
+        assert_eq!(cfg.gpu.device_id, 0);
+        assert!(cfg.gpu.zluda_dir.is_none());
+        assert!(cfg.gpu.zluda_auto_download);
     }
 
     #[test]

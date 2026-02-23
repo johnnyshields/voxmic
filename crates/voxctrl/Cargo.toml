@@ -27,6 +27,7 @@ cu-linux   = ["dep:voxctrl-cu", "dep:voxctrl-cu-linux"]
 
 # GPU acceleration (opt-in, cross-cutting)
 cuda = ["voxctrl-core/cuda", "voxctrl-stt/cuda"]
+zluda = ["voxctrl-core/zluda"]
 
 # Model manager consent dialog — forwarded to core
 consent-dialog = ["voxctrl-core/consent-dialog"]

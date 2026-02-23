@@ -20,6 +20,9 @@ router-llm = ["stt-voxtral-http"]
 # GPU acceleration (opt-in, cross-cutting)
 cuda = []
 
+# ZLUDA DLL management (AMD GPU support via CUDA emulation)
+zluda = ["dep:ureq", "dep:zip"]
+
 # Model manager consent dialog
 consent-dialog = ["dep:rfd"]
 
@@ -39,7 +42,7 @@ cpal = "0.15"
 # Text injection
 enigo = "0.2"
 
-# STT: voxtral-http (optional, default)
+# HTTP client (optional — used by stt-voxtral-http and zluda)
 ureq = { version = "2", features = ["json"], optional = true }
 
 # VAD: silero (optional)
@@ -51,3 +54,5 @@ interprocess = "2"
 # Model management
 dirs = "5"
 rfd = { version = "0.15", optional = true }
+# ZLUDA zip extraction (optional)
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }

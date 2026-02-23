@@ -278,8 +278,75 @@ fn run() -> Result<()> {
     log::info!("UI mode: {:?}", ui_mode);
 
     let cfg = config::load_config();
-    log::info!("Config: stt={}, vad={}, router={}, action={}",
-        cfg.stt.backend, cfg.vad.backend, cfg.router.backend, cfg.action.backend);
+    log::info!("Config: stt={}, vad={}, router={}, action={}, gpu={}",
+        cfg.stt.backend, cfg.vad.backend, cfg.router.backend, cfg.action.backend, cfg.gpu.backend);
+
+    // ── GPU detection & ZLUDA setup ──────────────────────────────────────
+    let gpus = voxctrl_core::gpu::detect_gpus();
+    for gpu in &gpus {
+        log::info!("Detected GPU: {} ({}, device {})", gpu.name, gpu.vendor, gpu.device_id);
+    }
+    let gpu_mode = voxctrl_core::gpu::resolve_gpu_mode(&cfg.gpu, &gpus);
+    log::info!("GPU mode: {}", gpu_mode);
+
+    // ZLUDA DLL management (only when zluda feature compiled in)
+    #[cfg(feature = "zluda")]
+    {
+        if gpu_mode == voxctrl_core::gpu::GpuMode::Zluda {
+            let zluda_dir = cfg.gpu.zluda_dir.clone()
+                .or_else(voxctrl_core::gpu::zluda::default_zluda_dir)
+                .unwrap_or_else(|| std::path::PathBuf::from("zluda"));
+
+            let status = voxctrl_core::gpu::zluda::check_zluda(&zluda_dir);
+            match status {
+                voxctrl_core::gpu::zluda::ZludaStatus::Installed(ref p) => {
+                    log::info!("ZLUDA found at {}", p.display());
+                    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+                        if let Err(e) = voxctrl_core::gpu::zluda::install_zluda_dlls(&zluda_dir, &exe_dir) {
+                            log::error!("Failed to install ZLUDA DLLs: {e}");
+                        }
+                    }
+                }
+                voxctrl_core::gpu::zluda::ZludaStatus::NotInstalled if cfg.gpu.zluda_auto_download => {
+                    log::info!("ZLUDA not found, downloading...");
+                    match voxctrl_core::gpu::zluda::download_zluda(&zluda_dir, |pct| {
+                        log::info!("ZLUDA download: {}%", pct);
+                    }) {
+                        Ok(_) => {
+                            if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+                                if let Err(e) = voxctrl_core::gpu::zluda::install_zluda_dlls(&zluda_dir, &exe_dir) {
+                                    log::error!("Failed to install ZLUDA DLLs: {e}");
+                                }
+                            }
+                        }
+                        Err(e) => log::error!("Failed to download ZLUDA: {e}"),
+                    }
+                }
+                _ => {
+                    log::info!("ZLUDA not available (status: {})", status);
+                }
+            }
+        } else if voxctrl_core::gpu::zluda::is_zluda_active() {
+            // Clean up stale ZLUDA DLLs when not in ZLUDA mode
+            log::info!("Removing stale ZLUDA DLLs (not in ZLUDA mode)");
+            if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+                let _ = voxctrl_core::gpu::zluda::uninstall_zluda_dlls(&exe_dir);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "zluda"))]
+    if gpu_mode == voxctrl_core::gpu::GpuMode::Zluda {
+        log::warn!("ZLUDA mode resolved but `zluda` feature not compiled in; falling back to CPU");
+    }
+
+    // Override whisper_device based on resolved GPU mode
+    let mut cfg = cfg;
+    let whisper_device = voxctrl_core::gpu::gpu_mode_to_whisper_device(gpu_mode);
+    if cfg.stt.whisper_device != whisper_device {
+        log::info!("Overriding whisper_device: {} → {}", cfg.stt.whisper_device, whisper_device);
+        cfg.stt.whisper_device = whisper_device.into();
+    }
 
     // Build model registry and scan cache (respecting config paths / cache_dir)
     let mut registry = models::ModelRegistry::new(models::catalog::all_models());

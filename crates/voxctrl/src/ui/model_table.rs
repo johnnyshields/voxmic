@@ -30,6 +30,15 @@ const VAD_BACKENDS: &[(&str, &str)] = &[
     ("silero", "Silero VAD v5"),
 ];
 
+const GPU_BACKENDS: &[(&str, &str)] = &[
+    ("auto", "Auto-detect"),
+    ("cuda", "CUDA (NVIDIA)"),
+    ("zluda", "ZLUDA (AMD)"),
+    ("directml", "DirectML"),
+    ("wgpu", "WebGPU"),
+    ("cpu", "CPU only"),
+];
+
 fn lookup_label(options: &'static [(&str, &str)], value: &str) -> &'static str {
     options
         .iter()
@@ -246,6 +255,17 @@ pub struct SettingsApp {
     stt_backend: String,
     whisper_model: String,
     vad_backend: String,
+    gpu_backend: String,
+    gpu_detected: String,
+    gpu_mode: String,
+    #[cfg(feature = "zluda")]
+    zluda_status: String,
+    #[cfg(feature = "zluda")]
+    zluda_downloading: bool,
+    #[cfg(feature = "zluda")]
+    zluda_progress_rx: Option<std::sync::mpsc::Receiver<u8>>,
+    #[cfg(feature = "zluda")]
+    zluda_done_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     hf_token: String,
     show_hf_token: bool,
     models_directory: Option<PathBuf>,
@@ -320,6 +340,32 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
         stt_backend: cfg.stt.backend.clone(),
         whisper_model: cfg.stt.whisper_model.clone(),
         vad_backend: cfg.vad.backend.clone(),
+        gpu_backend: cfg.gpu.backend.clone(),
+        gpu_detected: {
+            let gpus = voxctrl_core::gpu::detect_gpus();
+            if gpus.is_empty() {
+                "No GPU detected".into()
+            } else {
+                gpus.iter().map(|g| format!("{} ({})", g.name, g.vendor)).collect::<Vec<_>>().join(", ")
+            }
+        },
+        gpu_mode: {
+            let gpus = voxctrl_core::gpu::detect_gpus();
+            voxctrl_core::gpu::resolve_gpu_mode(&cfg.gpu, &gpus).to_string()
+        },
+        #[cfg(feature = "zluda")]
+        zluda_status: {
+            let dir = cfg.gpu.zluda_dir.clone()
+                .or_else(voxctrl_core::gpu::zluda::default_zluda_dir)
+                .unwrap_or_else(|| std::path::PathBuf::from("zluda"));
+            voxctrl_core::gpu::zluda::check_zluda(&dir).to_string()
+        },
+        #[cfg(feature = "zluda")]
+        zluda_downloading: false,
+        #[cfg(feature = "zluda")]
+        zluda_progress_rx: None,
+        #[cfg(feature = "zluda")]
+        zluda_done_rx: None,
         hf_token: load_hf_token(),
         show_hf_token: false,
         models_directory: cfg.models.models_directory.clone(),
@@ -433,6 +479,31 @@ impl eframe::App for SettingsApp {
             }
         }
 
+        // ── Poll ZLUDA download progress ─────────────────────────────
+        #[cfg(feature = "zluda")]
+        if self.zluda_downloading {
+            if let Some(ref rx) = self.zluda_progress_rx {
+                while let Ok(pct) = rx.try_recv() {
+                    self.zluda_status = format!("Downloading... {}%", pct);
+                }
+            }
+            if let Some(ref rx) = self.zluda_done_rx {
+                if let Ok(result) = rx.try_recv() {
+                    self.zluda_downloading = false;
+                    self.zluda_progress_rx = None;
+                    self.zluda_done_rx = None;
+                    match result {
+                        Ok(()) => {
+                            self.zluda_status = "Downloaded successfully".into();
+                        }
+                        Err(e) => {
+                            self.zluda_status = format!("Download failed: {e}");
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Draw UI ───────────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -455,12 +526,16 @@ impl eframe::App for SettingsApp {
                 .iter()
                 .any(|e| matches!(e.status, DownloadStatus::Downloading { .. }))
         };
+        #[allow(unused_mut)]
+        let mut has_bg_work = has_download;
+        #[cfg(feature = "zluda")]
+        { has_bg_work = has_bg_work || self.zluda_downloading; }
         let repaint_ms =
             if self.capture_state == CaptureState::Listening
                 || self.tab == Tab::Test
             {
                 50
-            } else if has_download {
+            } else if has_bg_work {
                 200
             } else {
                 500
@@ -652,6 +727,42 @@ impl SettingsApp {
                 });
                 ui.end_row();
 
+                // ── GPU backend ──────────────────────────────────────
+                ui.label("GPU Backend");
+                egui::ComboBox::from_id_salt("gpu_backend")
+                    .selected_text(lookup_label(GPU_BACKENDS, &self.gpu_backend))
+                    .show_ui(ui, |ui| {
+                        for &(value, label) in GPU_BACKENDS {
+                            ui.selectable_value(&mut self.gpu_backend, value.into(), label);
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Detected GPU");
+                ui.label(&self.gpu_detected);
+                ui.end_row();
+
+                ui.label("GPU Mode");
+                ui.label(&self.gpu_mode);
+                ui.end_row();
+
+                #[cfg(feature = "zluda")]
+                {
+                    ui.label("ZLUDA Status");
+                    ui.horizontal(|ui| {
+                        ui.label(&self.zluda_status);
+                        if !self.zluda_downloading {
+                            if ui.small_button("Download ZLUDA").clicked() {
+                                self.start_zluda_download();
+                            }
+                        } else {
+                            ui.spinner();
+                            ui.label("Downloading...");
+                        }
+                    });
+                    ui.end_row();
+                }
+
                 ui.label("Hugging Face Token");
                 ui.horizontal(|ui| {
                     let field = egui::TextEdit::singleline(&mut self.hf_token)
@@ -742,6 +853,30 @@ impl SettingsApp {
         }
     }
 
+    #[cfg(feature = "zluda")]
+    fn start_zluda_download(&mut self) {
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let cfg = config::load_config();
+        let zluda_dir = cfg.gpu.zluda_dir
+            .or_else(voxctrl_core::gpu::zluda::default_zluda_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("zluda"));
+
+        self.zluda_downloading = true;
+        self.zluda_progress_rx = Some(progress_rx);
+        self.zluda_done_rx = Some(done_rx);
+
+        std::thread::spawn(move || {
+            match voxctrl_core::gpu::zluda::download_zluda(&zluda_dir, |pct| {
+                let _ = progress_tx.send(pct);
+            }) {
+                Ok(_) => { let _ = done_tx.send(Ok(())); }
+                Err(e) => { let _ = done_tx.send(Err(format!("{e:#}"))); }
+            }
+        });
+    }
+
     fn save_config(&mut self) {
         let mut cfg = config::load_config();
         cfg.audio.device_pattern = self.selected_device.clone();
@@ -754,6 +889,7 @@ impl SettingsApp {
         cfg.stt.backend = self.stt_backend.clone();
         cfg.stt.whisper_model = self.whisper_model.clone();
         cfg.vad.backend = self.vad_backend.clone();
+        cfg.gpu.backend = self.gpu_backend.clone();
         cfg.models.models_directory = self.models_directory.clone();
         cfg.models.model_paths = self.model_paths.clone();
         config::save_config(&cfg);
