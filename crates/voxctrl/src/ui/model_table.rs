@@ -270,6 +270,12 @@ struct TestHotkeyState {
     pressed: bool,
 }
 
+struct SttTiming {
+    total_secs: f64,
+    transcribe_secs: f64,
+    method: String, // "server" or "direct"
+}
+
 struct TestState {
     // Step 1: Mic test
     mic_active: bool,
@@ -311,6 +317,17 @@ struct TestState {
     // Shared audio buffer for recording
     test_chunks: Arc<std::sync::Mutex<Vec<f32>>>,
     recording: Arc<std::sync::atomic::AtomicBool>,
+
+    // Latency tracking
+    mic_ready_latency: Option<f64>,
+    recording_start_time: Option<std::time::Instant>,
+    recording_duration: Option<f64>,
+    stt_latency: Option<f64>,
+    stt_transcribe_latency: Option<f64>,
+    stt_method: Option<String>,
+    stt_timing_slot: Option<Arc<std::sync::Mutex<Option<SttTiming>>>>,
+    cu_latency: Option<f64>,
+    cu_timing_slot: Option<Arc<std::sync::Mutex<Option<f64>>>>,
 }
 
 impl Default for TestState {
@@ -338,6 +355,15 @@ impl Default for TestState {
             cu_done_rx: None,
             test_chunks: Arc::new(std::sync::Mutex::new(Vec::new())),
             recording: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mic_ready_latency: None,
+            recording_start_time: None,
+            recording_duration: None,
+            stt_latency: None,
+            stt_transcribe_latency: None,
+            stt_method: None,
+            stt_timing_slot: None,
+            cu_latency: None,
+            cu_timing_slot: None,
         }
     }
 }
@@ -404,12 +430,12 @@ pub struct SettingsApp {
 /// winit 0.30 forbids multiple EventLoops per process, so we can't call
 /// `eframe::run_native` from a thread while the main GUI loop is running.
 /// Instead, re-exec ourselves with `--settings`.
-pub fn open_settings(_registry: Arc<Mutex<ModelRegistry>>) {
+pub fn open_settings() -> Option<std::process::Child> {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
             log::error!("Cannot locate own exe for settings window: {e}");
-            return;
+            return None;
         }
     };
 
@@ -417,8 +443,14 @@ pub fn open_settings(_registry: Arc<Mutex<ModelRegistry>>) {
         .arg("--settings")
         .spawn()
     {
-        Ok(_) => log::info!("Settings subprocess launched"),
-        Err(e) => log::error!("Failed to spawn settings window: {e}"),
+        Ok(child) => {
+            log::info!("Settings subprocess launched");
+            Some(child)
+        }
+        Err(e) => {
+            log::error!("Failed to spawn settings window: {e}");
+            None
+        }
     }
 }
 
@@ -980,12 +1012,29 @@ impl SettingsApp {
                 self.test.stt_status = status;
             }
         }
+        // Poll STT timing from background thread
+        let stt_timing_done = self.test.stt_timing_slot.as_ref()
+            .and_then(|slot| slot.lock().unwrap().take());
+        if let Some(timing) = stt_timing_done {
+            self.test.stt_latency = Some(timing.total_secs);
+            self.test.stt_transcribe_latency = Some(timing.transcribe_secs);
+            self.test.stt_method = Some(timing.method);
+        }
+
         let stt_done = self.test.stt_result_slot.as_ref()
             .and_then(|slot| slot.lock().unwrap().take());
         if let Some(result) = stt_done {
             self.test.stt_result = result;
             self.test.stt_result_slot = None;
             self.test.stt_status_slot = None;
+            self.test.stt_timing_slot = None;
+        }
+
+        // Poll CU timing from background thread
+        let cu_timing_done = self.test.cu_timing_slot.as_ref()
+            .and_then(|slot| slot.lock().unwrap().take());
+        if let Some(elapsed) = cu_timing_done {
+            self.test.cu_latency = Some(elapsed);
         }
 
         // Poll CU agent events
@@ -1065,7 +1114,15 @@ impl SettingsApp {
             };
             painter.rect_filled(filled, 2.0, color);
             if self.test.mic_active {
-                ui.label("Speak to see levels");
+                ui.horizontal(|ui| {
+                    ui.label("Speak to see levels");
+                    if let Some(latency) = self.test.mic_ready_latency {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_BLUE,
+                            format!("Ready in {:.0}ms", latency * 1000.0),
+                        );
+                    }
+                });
             } else {
                 ui.label("Click Start to test microphone");
             }
@@ -1202,6 +1259,24 @@ impl SettingsApp {
                 ui.separator();
                 ui.monospace(&self.test.stt_result);
             }
+            // STT latency breakdown
+            if self.test.stt_latency.is_some() {
+                ui.horizontal_wrapped(|ui| {
+                    let color = egui::Color32::LIGHT_BLUE;
+                    if let Some(dur) = self.test.recording_duration {
+                        ui.colored_label(color, format!("Recording: {dur:.1}s"));
+                        ui.colored_label(egui::Color32::DARK_GRAY, "|");
+                    }
+                    if let Some(tr) = self.test.stt_transcribe_latency {
+                        let method = self.test.stt_method.as_deref().unwrap_or("?");
+                        ui.colored_label(color, format!("Transcribe ({method}): {tr:.1}s"));
+                        ui.colored_label(egui::Color32::DARK_GRAY, "|");
+                    }
+                    if let Some(total) = self.test.stt_latency {
+                        ui.colored_label(color, format!("Total: {total:.1}s"));
+                    }
+                });
+            }
         });
 
         ui.add_space(4.0);
@@ -1262,6 +1337,12 @@ impl SettingsApp {
                     ui.separator();
                     ui.label("Summary:");
                     ui.monospace(&self.test.cu_summary);
+                    if let Some(latency) = self.test.cu_latency {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_BLUE,
+                            format!("Completed in {latency:.1}s"),
+                        );
+                    }
                 }
             }
 
@@ -1290,10 +1371,62 @@ impl SettingsApp {
             } else {
                 ui.label("Complete steps above to see final output");
             }
+
+            // Latency breakdown summary
+            let has_any_latency = self.test.mic_ready_latency.is_some()
+                || self.test.recording_duration.is_some()
+                || self.test.stt_latency.is_some()
+                || self.test.cu_latency.is_some();
+            if has_any_latency {
+                ui.separator();
+                ui.strong("Latency Breakdown:");
+                let mut total_secs = 0.0_f64;
+                egui::Grid::new("latency_breakdown")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        if let Some(v) = self.test.mic_ready_latency {
+                            ui.label("Mic ready:");
+                            ui.label(format!("{:.0}ms", v * 1000.0));
+                            ui.end_row();
+                            total_secs += v;
+                        }
+                        if let Some(v) = self.test.recording_duration {
+                            ui.label("Recording:");
+                            ui.label(format!("{v:.1}s"));
+                            ui.end_row();
+                            total_secs += v;
+                        }
+                        if let Some(v) = self.test.stt_transcribe_latency {
+                            let method = self.test.stt_method.as_deref().unwrap_or("?");
+                            ui.label(format!("STT ({method}):"));
+                            ui.label(format!("{v:.1}s"));
+                            ui.end_row();
+                        }
+                        if let Some(v) = self.test.stt_latency {
+                            total_secs += v;
+                        }
+                        if let Some(v) = self.test.cu_latency {
+                            ui.label("CU agent:");
+                            ui.label(format!("{v:.1}s"));
+                            ui.end_row();
+                            total_secs += v;
+                        }
+                        if total_secs > 0.0 {
+                            ui.separator();
+                            ui.separator();
+                            ui.end_row();
+                            ui.strong("Total:");
+                            ui.strong(format!("{total_secs:.1}s"));
+                            ui.end_row();
+                        }
+                    });
+            }
         });
     }
 
     fn start_mic_test(&mut self, cfg: &config::Config) {
+        let mic_start = std::time::Instant::now();
         let (tx, rx) = std::sync::mpsc::channel();
         match voxctrl_core::audio::start_test_capture(
             &cfg.audio.device_pattern,
@@ -1303,6 +1436,7 @@ impl SettingsApp {
             Arc::clone(&self.test.recording),
         ) {
             Ok((stream, actual_rate)) => {
+                self.test.mic_ready_latency = Some(mic_start.elapsed().as_secs_f64());
                 self.test.mic_stream = Some(stream);
                 self.test.mic_level_rx = Some(rx);
                 self.test.mic_active = true;
@@ -1321,6 +1455,7 @@ impl SettingsApp {
         }
         self.test.test_chunks.lock().unwrap().clear();
         self.test.recording.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.test.recording_start_time = Some(std::time::Instant::now());
         self.test.stt_status = "Recording...".into();
         self.test.stt_result.clear();
     }
@@ -1328,6 +1463,10 @@ impl SettingsApp {
     fn stop_recording_and_transcribe(&mut self, cfg: &config::Config) {
         self.test.recording.store(false, std::sync::atomic::Ordering::Relaxed);
         self.test.stt_status = "Transcribing...".into();
+
+        // Compute recording duration
+        self.test.recording_duration = self.test.recording_start_time
+            .map(|t| t.elapsed().as_secs_f64());
 
         let chunks: Vec<f32> = self.test.test_chunks.lock().unwrap().drain(..).collect();
         if chunks.is_empty() {
@@ -1340,15 +1479,19 @@ impl SettingsApp {
 
         let result_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let status_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let timing_slot: Arc<Mutex<Option<SttTiming>>> = Arc::new(Mutex::new(None));
         let result_writer = Arc::clone(&result_slot);
         let status_writer = Arc::clone(&status_slot);
+        let timing_writer = Arc::clone(&timing_slot);
 
         self.test.stt_result_slot = Some(result_slot);
         self.test.stt_status_slot = Some(status_slot);
+        self.test.stt_timing_slot = Some(timing_slot);
 
         std::thread::spawn(move || {
             match transcribe_chunks(&chunks, sample_rate, &stt_cfg) {
-                Ok(text) => {
+                Ok((text, timing)) => {
+                    *timing_writer.lock().unwrap() = Some(timing);
                     *result_writer.lock().unwrap() = Some(text);
                     *status_writer.lock().unwrap() = Some("Done".into());
                 }
@@ -1384,15 +1527,19 @@ impl SettingsApp {
 
         let result_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let status_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let timing_slot: Arc<Mutex<Option<SttTiming>>> = Arc::new(Mutex::new(None));
         let result_writer = Arc::clone(&result_slot);
         let status_writer = Arc::clone(&status_slot);
+        let timing_writer = Arc::clone(&timing_slot);
 
         self.test.stt_result_slot = Some(result_slot);
         self.test.stt_status_slot = Some(status_slot);
+        self.test.stt_timing_slot = Some(timing_slot);
 
         std::thread::spawn(move || {
-            match transcribe_pcm_via_server_or_direct(&samples, sample_rate, &stt_cfg) {
-                Ok(text) => {
+            match transcribe_chunks(&samples, sample_rate, &stt_cfg) {
+                Ok((text, timing)) => {
+                    *timing_writer.lock().unwrap() = Some(timing);
                     *result_writer.lock().unwrap() = Some(text);
                     *status_writer.lock().unwrap() = Some("Done".into());
                 }
@@ -1418,6 +1565,11 @@ impl SettingsApp {
         self.test.cu_event_rx = Some(event_rx);
         self.test.cu_done_rx = Some(done_rx);
 
+        let cu_timing_slot: Arc<Mutex<Option<f64>>> = Arc::new(Mutex::new(None));
+        let cu_timing_writer = Arc::clone(&cu_timing_slot);
+        self.test.cu_timing_slot = Some(cu_timing_slot);
+
+        let cu_start = std::time::Instant::now();
         std::thread::spawn(move || {
             let provider: Box<dyn voxctrl_cu::AccessibilityProvider> = if use_mock {
                 Box::new(voxctrl_cu::MockProvider::new())
@@ -1481,13 +1633,27 @@ impl SettingsApp {
                 Some(agent_event_tx),
             ) {
                 Ok(result) => {
+                    *cu_timing_writer.lock().unwrap() = Some(cu_start.elapsed().as_secs_f64());
                     let _ = done_tx.send(Ok(result.summary));
                 }
                 Err(e) => {
+                    *cu_timing_writer.lock().unwrap() = Some(cu_start.elapsed().as_secs_f64());
                     let _ = done_tx.send(Err(format!("{e:#}")));
                 }
             }
         });
+    }
+
+    fn format_hotkey_reg_error(e: &impl std::fmt::Display, label: &str) -> String {
+        let err_str = format!("{e}");
+        if err_str.to_lowercase().contains("already regist") {
+            format!(
+                "{label} is registered by another program. Close other instances \
+                 of voxctrl or other programs that use this shortcut, then retry."
+            )
+        } else {
+            format!("Failed to register {label}: {e}")
+        }
     }
 
     fn register_test_hotkey(&mut self) {
@@ -1516,9 +1682,7 @@ impl SettingsApp {
 
         let id = hotkey.id();
         if let Err(e) = manager.register(hotkey) {
-            self.test_hotkey_error = Some(format!(
-                "Failed to register hotkey (is the main app running?): {e}"
-            ));
+            self.test_hotkey_error = Some(Self::format_hotkey_reg_error(&e, "Hotkey"));
             return;
         }
 
@@ -1551,7 +1715,7 @@ impl SettingsApp {
 
             let cu_id = cu_hotkey.id();
             if let Err(e) = cu_manager.register(cu_hotkey) {
-                self.test_hotkey_cu_error = Some(format!("Failed to register CU hotkey: {e}"));
+                self.test_hotkey_cu_error = Some(Self::format_hotkey_reg_error(&e, "CU hotkey"));
                 return;
             }
 
@@ -1575,7 +1739,8 @@ fn transcribe_chunks(
     chunks: &[f32],
     sample_rate: u32,
     stt_cfg: &config::SttConfig,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, SttTiming)> {
+    let total_start = std::time::Instant::now();
     let (cmin, cmax) = chunks.iter().fold((f32::MAX, f32::MIN), |(mn, mx), &v| (mn.min(v), mx.max(v)));
     let cmean: f64 = chunks.iter().map(|&v| v as f64).sum::<f64>() / chunks.len().max(1) as f64;
     let rms: f64 = (chunks.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / chunks.len().max(1) as f64).sqrt();
@@ -1585,20 +1750,26 @@ fn transcribe_chunks(
         cmin, cmax, cmean, rms
     );
 
-    transcribe_pcm_via_server_or_direct(chunks, sample_rate, stt_cfg)
+    let transcribe_start = std::time::Instant::now();
+    let (text, method) = transcribe_pcm_via_server_or_direct(chunks, sample_rate, stt_cfg)?;
+    let transcribe_secs = transcribe_start.elapsed().as_secs_f64();
+    let total_secs = total_start.elapsed().as_secs_f64();
+
+    Ok((text, SttTiming { total_secs, transcribe_secs, method }))
 }
 
 /// Try the named-pipe STT server first; fall back to a local transcriber.
+/// Returns `(text, method)` where method is `"server"` or `"direct"`.
 fn transcribe_pcm_via_server_or_direct(
     samples: &[f32],
     sample_rate: u32,
     stt_cfg: &config::SttConfig,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, String)> {
     log::info!("[testbed] Trying STT via named-pipe server...");
     match voxctrl_core::stt_client::transcribe_pcm_via_server(samples, sample_rate) {
         Ok(text) => {
             log::info!("[testbed] Server transcription OK: {:?}", text);
-            Ok(text)
+            Ok((text, "server".into()))
         }
         Err(server_err) => {
             log::warn!("[testbed] Server unavailable ({server_err:#}), trying direct transcriber...");
@@ -1608,7 +1779,7 @@ fn transcribe_pcm_via_server_or_direct(
                 Ok(text) => log::info!("[testbed] Direct transcription OK: {:?}", text),
                 Err(e) => log::error!("[testbed] Direct transcription failed: {e:#}"),
             }
-            result
+            result.map(|text| (text, "direct".into()))
         }
     }
 }
@@ -2018,7 +2189,7 @@ fn download_model_files(
         out.flush()?;
 
         // Validate: model files should be at least 1 KB (HTML error pages are small)
-        if file_bytes < 1024 && filename.ends_with(".safetensors") {
+        if file_bytes < 1024 && (filename.ends_with(".safetensors") || filename.ends_with(".onnx")) {
             let _ = std::fs::remove_file(&dest);
             anyhow::bail!(
                 "Downloaded {filename} is only {file_bytes} bytes — likely an error page, not model data. \

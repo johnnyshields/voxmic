@@ -95,6 +95,7 @@ fn run_gui(
         #[allow(dead_code)]
         registry: Arc<Mutex<models::ModelRegistry>>,
         menu_ids: tray::TrayMenuIds,
+        settings_child: Option<std::process::Child>,
     }
 
     impl ApplicationHandler for App {
@@ -119,8 +120,37 @@ fn run_gui(
                     log::info!("Quit requested");
                     _event_loop.exit();
                 } else if event.id == self.menu_ids.settings {
-                    log::info!("Opening settings...");
-                    ui::open_settings(self.registry.clone());
+                    if self.settings_child.is_none() {
+                        log::info!("Opening settings...");
+                        if let Some(ref mgr) = self.hotkey_manager {
+                            hotkey::unregister_hotkeys(mgr, &self.hotkey_ids);
+                        }
+                        self.settings_child = ui::open_settings();
+                    } else {
+                        log::info!("Settings already open");
+                    }
+                }
+            }
+
+            // Check if Settings subprocess has exited → re-register hotkeys
+            let settings_exited = match self.settings_child {
+                Some(ref mut child) => match child.try_wait() {
+                    Ok(Some(status)) => {
+                        log::info!("Settings subprocess exited: {status}");
+                        true
+                    }
+                    Ok(None) => false,
+                    Err(e) => {
+                        log::warn!("Error polling settings subprocess: {e}");
+                        true
+                    }
+                },
+                None => false,
+            };
+            if settings_exited {
+                self.settings_child = None;
+                if let Some(ref mgr) = self.hotkey_manager {
+                    hotkey::reregister_hotkeys(mgr, &self.hotkey_ids);
                 }
             }
 
@@ -143,7 +173,7 @@ fn run_gui(
 
     let (hotkey_manager, hotkey_ids) = match hotkey::setup_hotkeys(&cfg.hotkey) {
         Ok(Some((mgr, ids))) => (Some(mgr), ids),
-        Ok(None) => (None, hotkey::HotkeyIds { dictation: None, computer_use: None }),
+        Ok(None) => (None, hotkey::HotkeyIds::none()),
         Err(e) => return Err(e),
     };
 
@@ -170,6 +200,7 @@ fn run_gui(
         _audio_stream: Some(audio_stream),
         registry,
         menu_ids,
+        settings_child: None,
     };
 
     if app.hotkey_ids.dictation.is_none() {

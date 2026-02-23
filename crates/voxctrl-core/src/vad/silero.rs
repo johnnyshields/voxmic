@@ -1,10 +1,12 @@
 //! Silero VAD — neural voice activity detection via ONNX Runtime.
 //!
-//! Uses the Silero VAD v4 ONNX model. Download from:
-//! <https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx>
+//! Uses the Silero VAD v5 ONNX model from
+//! <https://huggingface.co/onnx-community/silero-vad>.
 //!
-//! Place the file at `silero_vad.onnx` next to the binary, or set the
-//! `SILERO_VAD_MODEL` environment variable to the full path.
+//! The model is normally resolved from the HuggingFace cache via the model
+//! registry. You can override the path with `$SILERO_VAD_MODEL`.
+
+use std::path::PathBuf;
 
 use super::VoiceDetector;
 use ort::{session::Session, value::Tensor};
@@ -25,19 +27,22 @@ pub struct SileroVad {
 impl SileroVad {
     /// Create a new Silero VAD instance.
     ///
-    /// Loads the ONNX model from `$SILERO_VAD_MODEL` or `silero_vad.onnx`
-    /// next to the executable.
-    pub fn new(threshold: f32) -> anyhow::Result<Self> {
-        let model_path = std::env::var("SILERO_VAD_MODEL").unwrap_or_else(|_| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("silero_vad.onnx")))
-                .unwrap_or_else(|| "silero_vad.onnx".into())
-                .to_string_lossy()
-                .into_owned()
-        });
+    /// If `model_path` is provided it is used directly. Otherwise falls back
+    /// to `$SILERO_VAD_MODEL` or `silero_vad.onnx` next to the executable.
+    pub fn new(threshold: f32, model_path: Option<PathBuf>) -> anyhow::Result<Self> {
+        let resolved = match model_path {
+            Some(p) => p,
+            None => PathBuf::from(std::env::var("SILERO_VAD_MODEL").unwrap_or_else(|_| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("silero_vad.onnx")))
+                    .unwrap_or_else(|| "silero_vad.onnx".into())
+                    .to_string_lossy()
+                    .into_owned()
+            })),
+        };
 
-        let session = Session::builder()?.commit_from_file(&model_path)?;
+        let session = Session::builder()?.commit_from_file(&resolved)?;
 
         Ok(Self {
             session,
