@@ -18,11 +18,57 @@ use crate::provider::AccessibilityProvider;
 use crate::screenshot;
 use crate::tree::ElementId;
 
+/// A newtype wrapping an API key string that masks its value in Debug output.
+#[derive(Clone)]
+pub struct ApiKey {
+    key: String,
+    masked: bool,
+}
+
+impl ApiKey {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            masked: true,
+        }
+    }
+
+    pub fn set_masked(&mut self, masked: bool) {
+        self.masked = masked;
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.key
+    }
+}
+
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.masked {
+            write!(f, "ApiKey(***)")
+        } else {
+            write!(f, "ApiKey({:?})", self.key)
+        }
+    }
+}
+
+impl From<String> for ApiKey {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<&str> for ApiKey {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
 /// Configuration for the agent loop.
 pub struct AgentConfig {
     pub model: String,
     pub api_base_url: String,
-    pub api_key: String,
+    pub api_key: ApiKey,
     pub max_iterations: u32,
     pub max_tree_depth: usize,
     pub include_screenshots: bool,
@@ -33,7 +79,7 @@ impl Default for AgentConfig {
         Self {
             model: "claude-sonnet-4-20250514".into(),
             api_base_url: "https://api.anthropic.com".into(),
-            api_key: String::new(),
+            api_key: ApiKey::new(String::new()),
             max_iterations: 10,
             max_tree_depth: 8,
             include_screenshots: false,
@@ -154,7 +200,7 @@ pub fn run_agent(
                         _ => provider.perform_action(ui_action)?,
                     }
                 }
-                Err(e) => UiActionResult::err(format!("Invalid tool call: {e}")),
+                Err(e) => UiActionResult::err(format!("Tool call '{tool_name}' failed: {e}")),
             };
 
             log::info!("  → {}: {}", if result.success { "ok" } else { "err" }, result.message);
@@ -196,64 +242,79 @@ pub fn run_agent(
 }
 
 /// Parse a tool call from the LLM into a UiAction.
-fn parse_tool_call(name: &str, input: &Value) -> anyhow::Result<UiAction> {
-    let get_element_id = |input: &Value| -> anyhow::Result<ElementId> {
-        let index = input["element_id"]
+fn parse_tool_call(tool_name: &str, input: &Value) -> anyhow::Result<UiAction> {
+    let get_element_id = |input: &Value, tool_name: &str| -> anyhow::Result<ElementId> {
+        let id = input["element_id"]
             .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("missing element_id"))? as usize;
+            .ok_or_else(|| anyhow::anyhow!("missing required field 'element_id'"))? as usize;
+        if id > 100_000 {
+            anyhow::bail!("{tool_name}: element_id {id} exceeds maximum (100000)");
+        }
         Ok(ElementId {
             platform_handle: String::new(), // resolved by provider at action time
-            index,
+            index: id,
         })
     };
 
-    match name {
+    match tool_name {
         "click" => Ok(UiAction::Click {
-            element_id: get_element_id(input)?,
+            element_id: get_element_id(input, tool_name)?,
         }),
         "set_value" => Ok(UiAction::SetValue {
-            element_id: get_element_id(input)?,
+            element_id: get_element_id(input, tool_name)?,
             value: input["value"]
                 .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing value"))?
+                .ok_or_else(|| anyhow::anyhow!("set_value: missing required field 'value'"))?
                 .into(),
         }),
         "send_keys" => Ok(UiAction::SendKeys {
             keys: input["keys"]
                 .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing keys"))?
+                .ok_or_else(|| anyhow::anyhow!("send_keys: missing required field 'keys'"))?
                 .into(),
         }),
-        "scroll" => Ok(UiAction::Scroll {
-            element_id: get_element_id(input)?,
-            direction: match input["direction"].as_str().unwrap_or("down") {
+        "scroll" => {
+            let element_id = get_element_id(input, tool_name)?;
+            let direction = match input["direction"].as_str().unwrap_or("down") {
                 "up" => ScrollDirection::Up,
                 "down" => ScrollDirection::Down,
                 "left" => ScrollDirection::Left,
                 "right" => ScrollDirection::Right,
-                other => anyhow::bail!("unknown scroll direction: {other}"),
-            },
-            amount: input["amount"].as_u64().unwrap_or(3) as u32,
-        }),
+                other => anyhow::bail!("scroll: invalid direction '{other}' (expected: up, down, left, right)"),
+            };
+            let amount = input["amount"].as_u64().unwrap_or(3) as u32;
+            if !(1..=100).contains(&amount) {
+                anyhow::bail!("scroll: amount {amount} out of range (1-100)");
+            }
+            Ok(UiAction::Scroll {
+                element_id,
+                direction,
+                amount,
+            })
+        }
         "toggle" => Ok(UiAction::Toggle {
-            element_id: get_element_id(input)?,
+            element_id: get_element_id(input, tool_name)?,
         }),
         "expand" => Ok(UiAction::Expand {
-            element_id: get_element_id(input)?,
+            element_id: get_element_id(input, tool_name)?,
         }),
         "collapse" => Ok(UiAction::Collapse {
-            element_id: get_element_id(input)?,
+            element_id: get_element_id(input, tool_name)?,
         }),
         "select" => Ok(UiAction::Select {
-            element_id: get_element_id(input)?,
+            element_id: get_element_id(input, tool_name)?,
         }),
         "focus" => Ok(UiAction::Focus {
-            element_id: get_element_id(input)?,
+            element_id: get_element_id(input, tool_name)?,
         }),
-        "wait" => Ok(UiAction::Wait {
-            ms: input["ms"].as_u64().unwrap_or(1000),
-        }),
-        _ => anyhow::bail!("unknown tool: {name}"),
+        "wait" => {
+            let ms = input["ms"].as_u64().unwrap_or(1000);
+            if !(1..=60_000).contains(&ms) {
+                anyhow::bail!("wait: ms {ms} out of range (1-60000)");
+            }
+            Ok(UiAction::Wait { ms })
+        }
+        _ => anyhow::bail!("unknown tool '{tool_name}' — available: click, set_value, send_keys, scroll, toggle, expand, collapse, select, focus, wait"),
     }
 }
 
@@ -272,7 +333,7 @@ fn call_claude_api(config: &AgentConfig, messages: &[Value]) -> anyhow::Result<V
     log::debug!("Claude API request: {} messages", messages.len());
 
     let resp = ureq::post(&url)
-        .set("x-api-key", &config.api_key)
+        .set("x-api-key", config.api_key.as_str())
         .set("anthropic-version", "2023-06-01")
         .set("content-type", "application/json")
         .send_json(&body)
@@ -350,5 +411,72 @@ mod tests {
     fn parse_unknown_tool_returns_error() {
         let input = serde_json::json!({});
         assert!(parse_tool_call("fly_to_moon", &input).is_err());
+    }
+
+    // Task #1: ApiKey tests
+
+    #[test]
+    fn api_key_masks_in_debug() {
+        let key = ApiKey::new("sk-ant-secret123");
+        assert!(!format!("{key:?}").contains("secret"));
+        assert!(format!("{key:?}").contains("***"));
+    }
+
+    #[test]
+    fn api_key_reveals_when_unmasked() {
+        let mut key = ApiKey::new("sk-ant-secret123");
+        key.set_masked(false);
+        assert!(format!("{key:?}").contains("secret123"));
+    }
+
+    // Task #5: Boundary/edge-case tests
+
+    #[test]
+    fn parse_element_id_overflow() {
+        let input = serde_json::json!({"element_id": 100_001});
+        let err = parse_tool_call("click", &input).unwrap_err();
+        assert!(err.to_string().contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn parse_wait_excessive_ms() {
+        let input = serde_json::json!({"ms": 120_000});
+        let err = parse_tool_call("wait", &input).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn parse_wait_zero_ms() {
+        let input = serde_json::json!({"ms": 0});
+        let err = parse_tool_call("wait", &input).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn parse_scroll_amount_overflow() {
+        let input = serde_json::json!({"element_id": 1, "direction": "up", "amount": 999});
+        let err = parse_tool_call("scroll", &input).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn parse_click_missing_element_id() {
+        let input = serde_json::json!({});
+        let err = parse_tool_call("click", &input).unwrap_err();
+        assert!(err.to_string().contains("element_id"));
+    }
+
+    #[test]
+    fn parse_set_value_missing_value() {
+        let input = serde_json::json!({"element_id": 1});
+        let err = parse_tool_call("set_value", &input).unwrap_err();
+        assert!(err.to_string().contains("value"));
+    }
+
+    #[test]
+    fn parse_send_keys_missing_keys() {
+        let input = serde_json::json!({});
+        let err = parse_tool_call("send_keys", &input).unwrap_err();
+        assert!(err.to_string().contains("keys"));
     }
 }

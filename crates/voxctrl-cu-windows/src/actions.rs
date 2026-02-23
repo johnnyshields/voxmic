@@ -103,37 +103,37 @@ pub fn execute_action(
                 .get_scroll_pattern()
                 .context("element does not support ScrollPattern")?;
 
-            let amount_f64 = *amount as f64;
-            match direction {
-                ScrollDirection::Up => {
-                    pattern.scroll(
-                        uiautomation::types::ScrollAmount::NoAmount,
-                        uiautomation::types::ScrollAmount::LargeDecrement,
-                    ).context("scroll up")?;
-                }
-                ScrollDirection::Down => {
-                    pattern.scroll(
-                        uiautomation::types::ScrollAmount::NoAmount,
-                        uiautomation::types::ScrollAmount::LargeIncrement,
-                    ).context("scroll down")?;
-                }
-                ScrollDirection::Left => {
-                    pattern.scroll(
-                        uiautomation::types::ScrollAmount::LargeDecrement,
-                        uiautomation::types::ScrollAmount::NoAmount,
-                    ).context("scroll left")?;
-                }
-                ScrollDirection::Right => {
-                    pattern.scroll(
-                        uiautomation::types::ScrollAmount::LargeIncrement,
-                        uiautomation::types::ScrollAmount::NoAmount,
-                    ).context("scroll right")?;
+            for i in 0..*amount {
+                match direction {
+                    ScrollDirection::Up => {
+                        pattern.scroll(
+                            uiautomation::types::ScrollAmount::NoAmount,
+                            uiautomation::types::ScrollAmount::LargeDecrement,
+                        ).with_context(|| format!("scroll up (step {}/{})", i + 1, amount))?;
+                    }
+                    ScrollDirection::Down => {
+                        pattern.scroll(
+                            uiautomation::types::ScrollAmount::NoAmount,
+                            uiautomation::types::ScrollAmount::LargeIncrement,
+                        ).with_context(|| format!("scroll down (step {}/{})", i + 1, amount))?;
+                    }
+                    ScrollDirection::Left => {
+                        pattern.scroll(
+                            uiautomation::types::ScrollAmount::LargeDecrement,
+                            uiautomation::types::ScrollAmount::NoAmount,
+                        ).with_context(|| format!("scroll left (step {}/{})", i + 1, amount))?;
+                    }
+                    ScrollDirection::Right => {
+                        pattern.scroll(
+                            uiautomation::types::ScrollAmount::LargeIncrement,
+                            uiautomation::types::ScrollAmount::NoAmount,
+                        ).with_context(|| format!("scroll right (step {}/{})", i + 1, amount))?;
+                    }
                 }
             }
-            let _ = amount_f64; // amount is a hint; we use large increment/decrement
             Ok(UiActionResult::ok(format!(
-                "Scrolled #{} {:?}",
-                element_id.index, direction
+                "Scrolled #{} {:?} x{}",
+                element_id.index, direction, amount
             )))
         }
 

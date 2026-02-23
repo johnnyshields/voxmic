@@ -263,4 +263,105 @@ mod tests {
         let id = ElementId { platform_handle: "abc".into(), index: 5 };
         assert_eq!(format!("{id}"), "#5");
     }
+
+    #[test]
+    fn all_invisible_tree() {
+        let tree = UiTree {
+            window_title: "Test".into(),
+            process_name: "test".into(),
+            element_count: 1,
+            root: UiNode {
+                id: ElementId { platform_handle: "r".into(), index: 0 },
+                role: UiRole::Window,
+                name: "Root".into(),
+                description: None,
+                bounds: None,
+                states: vec![UiState::Invisible],
+                value: None,
+                available_actions: vec![],
+                children: vec![],
+            },
+        };
+        let json = tree.to_llm_json(8);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed["root"].is_null(), "invisible root should be pruned");
+    }
+
+    #[test]
+    fn mixed_visible_invisible_siblings() {
+        let tree = UiTree {
+            window_title: "Test".into(),
+            process_name: "test".into(),
+            element_count: 3,
+            root: UiNode {
+                id: ElementId { platform_handle: "r".into(), index: 0 },
+                role: UiRole::Window,
+                name: "Root".into(),
+                description: None,
+                bounds: None,
+                states: vec![UiState::Enabled],
+                value: None,
+                available_actions: vec![],
+                children: vec![
+                    UiNode {
+                        id: ElementId { platform_handle: "a".into(), index: 1 },
+                        role: UiRole::Button,
+                        name: "Visible".into(),
+                        description: None,
+                        bounds: None,
+                        states: vec![UiState::Enabled],
+                        value: None,
+                        available_actions: vec!["click".into()],
+                        children: vec![],
+                    },
+                    UiNode {
+                        id: ElementId { platform_handle: "b".into(), index: 2 },
+                        role: UiRole::Button,
+                        name: "Hidden".into(),
+                        description: None,
+                        bounds: None,
+                        states: vec![UiState::Invisible],
+                        value: None,
+                        available_actions: vec![],
+                        children: vec![],
+                    },
+                ],
+            },
+        };
+        let json = tree.to_llm_json(8);
+        assert!(json.contains("Visible"));
+        assert!(!json.contains("Hidden"));
+    }
+
+    #[test]
+    fn offscreen_nodes_pruned() {
+        let tree = UiTree {
+            window_title: "Test".into(),
+            process_name: "test".into(),
+            element_count: 2,
+            root: UiNode {
+                id: ElementId { platform_handle: "r".into(), index: 0 },
+                role: UiRole::Window,
+                name: "Root".into(),
+                description: None,
+                bounds: None,
+                states: vec![UiState::Enabled],
+                value: None,
+                available_actions: vec![],
+                children: vec![UiNode {
+                    id: ElementId { platform_handle: "off".into(), index: 1 },
+                    role: UiRole::Pane,
+                    name: "Offscreen".into(),
+                    description: None,
+                    bounds: None,
+                    states: vec![UiState::Offscreen],
+                    value: None,
+                    available_actions: vec![],
+                    children: vec![],
+                }],
+            },
+        };
+        let json = tree.to_llm_json(8);
+        assert!(!json.contains("Offscreen"));
+    }
 }

@@ -24,15 +24,28 @@ const MAX_WALK_DEPTH: usize = 25;
 /// can look up elements by the index the LLM references.
 pub struct WindowsUiaProvider {
     element_map: Mutex<HashMap<usize, UIElement>>,
+    creator_thread_id: std::thread::ThreadId,
 }
 
 impl WindowsUiaProvider {
     pub fn new() -> Result<Self> {
-        // Verify UIA is available by creating an instance.
         let _uia = UIAutomation::new().context("Failed to initialize UI Automation")?;
         Ok(Self {
             element_map: Mutex::new(HashMap::new()),
+            creator_thread_id: std::thread::current().id(),
         })
+    }
+
+    /// Assert that we're on the creator thread (COM apartment-threading requirement).
+    fn assert_creator_thread(&self) {
+        debug_assert_eq!(
+            std::thread::current().id(),
+            self.creator_thread_id,
+            "WindowsUiaProvider must be used from the thread that created it \
+             (COM apartment-threading). Current thread: {:?}, creator: {:?}",
+            std::thread::current().id(),
+            self.creator_thread_id,
+        );
     }
 
     /// Replace the stored element map with a new one.
@@ -44,6 +57,7 @@ impl WindowsUiaProvider {
 
 impl AccessibilityProvider for WindowsUiaProvider {
     fn get_focused_tree(&self) -> Result<UiTree> {
+        self.assert_creator_thread();
         let uia = UIAutomation::new().context("UI Automation init")?;
         let focused = uia.get_focused_element().context("get focused element")?;
 
@@ -91,6 +105,7 @@ impl AccessibilityProvider for WindowsUiaProvider {
     }
 
     fn get_tree_for_pid(&self, pid: u32) -> Result<UiTree> {
+        self.assert_creator_thread();
         let uia = UIAutomation::new().context("UI Automation init")?;
         let root = uia.get_root_element().context("get desktop root")?;
 
@@ -137,6 +152,7 @@ impl AccessibilityProvider for WindowsUiaProvider {
     }
 
     fn find_elements(&self, query: &str) -> Result<Vec<UiNode>> {
+        self.assert_creator_thread();
         let uia = UIAutomation::new().context("UI Automation init")?;
         let root = uia.get_root_element().context("get desktop root")?;
 
@@ -166,8 +182,14 @@ impl AccessibilityProvider for WindowsUiaProvider {
     }
 
     fn perform_action(&self, action: &UiAction) -> Result<UiActionResult> {
-        let guard = self.element_map.lock().unwrap();
-        execute_action(action, &guard)
+        self.assert_creator_thread();
+        // Take a snapshot of the element map to release the lock before
+        // potentially-blocking COM calls.
+        let snapshot = {
+            let guard = self.element_map.lock().unwrap();
+            guard.clone()
+        };
+        execute_action(action, &snapshot)
     }
 
     fn capture_screenshot(&self) -> Result<Option<Vec<u8>>> {
@@ -184,13 +206,25 @@ fn process_name_from_pid(pid: u32) -> String {
     if pid == 0 {
         return String::new();
     }
-    // Read from /proc on WSL or use Windows API — simplified for now.
-    std::fs::read_to_string(format!("/proc/{pid}/comm"))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| format!("pid:{pid}"))
+    // /proc/{pid}/comm only exists on Linux/WSL — expected to fail on native Windows.
+    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => {
+            log::debug!("Could not read /proc/{pid}/comm (expected on Windows) — using pid:{pid}");
+            format!("pid:{pid}")
+        }
+    }
 }
 
-// Safety: UIAutomation COM objects are apartment-threaded but we access them
-// from the thread that created them. The Mutex serialises access.
+// SAFETY: WindowsUiaProvider wraps COM UIAutomation objects which use apartment
+// threading (STA). This is safe because:
+// 1. All COM calls go through methods that debug_assert we're on the creator thread
+// 2. The Mutex<HashMap<usize, UIElement>> serialises access to element handles
+// 3. In the current architecture, the provider is created and used on a single thread
+//    within the agent loop pipeline
+//
+// If this provider is ever used from multiple threads, the debug_assert will catch
+// the violation in dev/test builds. For production multi-thread use, consider wrapping
+// in a dedicated COM STA thread with message pumping.
 unsafe impl Send for WindowsUiaProvider {}
 unsafe impl Sync for WindowsUiaProvider {}

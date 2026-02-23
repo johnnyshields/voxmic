@@ -37,6 +37,48 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
     serde_json::from_str(TOOLS_JSON).expect("built-in tool definitions should be valid JSON")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_definitions_match_known_actions() {
+        let tools = tool_definitions();
+        let tool_names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+
+        // These must match the arms in agent::parse_tool_call()
+        let expected = vec![
+            "click", "set_value", "send_keys", "scroll", "toggle",
+            "expand", "collapse", "select", "focus", "wait",
+        ];
+
+        assert_eq!(
+            tool_names.len(),
+            expected.len(),
+            "tool count mismatch: tools JSON has {:?}, expected {:?}",
+            tool_names,
+            expected
+        );
+
+        for name in &expected {
+            assert!(
+                tool_names.contains(name),
+                "missing tool definition for '{name}' — add it to TOOLS_JSON in prompt.rs"
+            );
+        }
+
+        for name in &tool_names {
+            assert!(
+                expected.contains(name),
+                "extra tool '{name}' in TOOLS_JSON — add a parse_tool_call arm in agent.rs"
+            );
+        }
+    }
+}
+
 const TOOLS_JSON: &str = r#"[
   {
     "name": "click",

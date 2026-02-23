@@ -33,7 +33,7 @@ impl ComputerUseExecutor {
                 .cu_api_base_url
                 .clone()
                 .unwrap_or_else(|| "https://api.anthropic.com".into()),
-            api_key,
+            api_key: api_key.into(),
             max_iterations: cfg.cu_max_iterations.unwrap_or(10),
             max_tree_depth: cfg.cu_max_tree_depth.unwrap_or(8),
             include_screenshots: cfg.cu_include_screenshots.unwrap_or(false),
