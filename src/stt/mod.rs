@@ -73,7 +73,7 @@ pub fn create_transcriber(cfg: &SttConfig, model_dir: Option<PathBuf>) -> anyhow
         }
         "whisper-native" => {
             #[cfg(feature = "stt-whisper-native")]
-            { whisper_native::WhisperNativeTranscriber::new(cfg).map(|t| Box::new(t) as _) }
+            { whisper_native::WhisperNativeTranscriber::new(cfg, model_dir).map(|t| Box::new(t) as _) }
             #[cfg(not(feature = "stt-whisper-native"))]
             { Err(anyhow::anyhow!("stt-whisper-native feature not compiled in")) }
         }

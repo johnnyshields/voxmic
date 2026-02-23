@@ -41,7 +41,7 @@ pub struct WhisperNativeTranscriber {
 }
 
 impl WhisperNativeTranscriber {
-    pub fn new(cfg: &SttConfig) -> anyhow::Result<Self> {
+    pub fn new(cfg: &SttConfig, model_dir: Option<std::path::PathBuf>) -> anyhow::Result<Self> {
         let device = match cfg.whisper_device.as_str() {
             "cuda" => {
                 #[cfg(feature = "cuda")]
@@ -57,14 +57,21 @@ impl WhisperNativeTranscriber {
             _ => Device::Cpu,
         };
 
-        let repo_id = model_to_repo(&cfg.whisper_model);
-        log::info!("WhisperNativeTranscriber: downloading model {repo_id}");
-
-        let api = Api::new()?;
-        let repo = api.model(repo_id);
-        let config_path = repo.get("config.json")?;
-        let model_path = repo.get("model.safetensors")?;
-        let tokenizer_path = repo.get("tokenizer.json")?;
+        // Resolve model files: prefer local model_dir, fall back to hf_hub download.
+        let (config_path, model_path, tokenizer_path) = if let Some(ref dir) = model_dir {
+            let cp = dir.join("config.json");
+            let mp = dir.join("model.safetensors");
+            let tp = dir.join("tokenizer.json");
+            if cp.exists() && mp.exists() && tp.exists() {
+                log::info!("WhisperNativeTranscriber: loading from local dir {:?}", dir);
+                (cp, mp, tp)
+            } else {
+                log::warn!("WhisperNativeTranscriber: local dir {:?} missing files, trying hf_hub", dir);
+                Self::resolve_via_hub(cfg)?
+            }
+        } else {
+            Self::resolve_via_hub(cfg)?
+        };
 
         let config: m::Config = serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
         let n_mels = config.num_mel_bins;
@@ -107,6 +114,18 @@ impl WhisperNativeTranscriber {
             transcribe_token,
             no_timestamps_token,
         })
+    }
+
+    /// Download model files via hf_hub API.
+    fn resolve_via_hub(cfg: &SttConfig) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {
+        let repo_id = model_to_repo(&cfg.whisper_model);
+        log::info!("WhisperNativeTranscriber: downloading model {repo_id} via hf_hub");
+        let api = Api::new()?;
+        let repo = api.model(repo_id);
+        let config_path = repo.get("config.json")?;
+        let model_path = repo.get("model.safetensors")?;
+        let tokenizer_path = repo.get("tokenizer.json")?;
+        Ok((config_path, model_path, tokenizer_path))
     }
 }
 

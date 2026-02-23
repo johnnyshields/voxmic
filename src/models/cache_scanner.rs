@@ -26,7 +26,7 @@ pub fn scan_hf_cache(entries: &mut [ModelEntry]) {
             let snapshots_dir = model_dir.join("snapshots");
 
             if snapshots_dir.is_dir() {
-                if let Some((path, size)) = find_snapshot(&snapshots_dir) {
+                if let Some((path, size)) = find_snapshot(&snapshots_dir, &entry.info.hf_files) {
                     log::info!(
                         "Found cached model '{}' at {:?} ({} bytes)",
                         entry.info.id,
@@ -61,13 +61,13 @@ pub fn effective_cache_dir() -> Option<PathBuf> {
     hf_cache_dir()
 }
 
-/// Find a snapshot directory and compute total file size.
-fn find_snapshot(snapshots_dir: &Path) -> Option<(PathBuf, u64)> {
+/// Find a snapshot directory that contains all required files.
+fn find_snapshot(snapshots_dir: &Path, required_files: &[String]) -> Option<(PathBuf, u64)> {
     let read_dir = std::fs::read_dir(snapshots_dir).ok()?;
 
     for dir_entry in read_dir.flatten() {
         let path = dir_entry.path();
-        if path.is_dir() {
+        if path.is_dir() && has_all_files(&path, required_files) {
             let size = dir_size(&path);
             if size > 0 {
                 return Some((path, size));
@@ -94,7 +94,7 @@ pub fn scan_models_directory(entries: &mut [ModelEntry], dir: &Path) {
         if let Some(ref repo) = entry.info.hf_repo {
             // repo is "org/name" — look for dir/org/name/
             let model_dir = dir.join(repo);
-            if model_dir.is_dir() {
+            if model_dir.is_dir() && has_all_files(&model_dir, &entry.info.hf_files) {
                 let size = dir_size(&model_dir);
                 if size > 0 {
                     log::info!(
@@ -141,6 +141,15 @@ pub fn apply_model_paths(entries: &mut [ModelEntry], paths: &HashMap<String, Pat
             }
         }
     }
+}
+
+/// Check that all required files exist in a directory.
+/// If `required_files` is empty, any non-empty directory is accepted.
+fn has_all_files(dir: &Path, required_files: &[String]) -> bool {
+    if required_files.is_empty() {
+        return true;
+    }
+    required_files.iter().all(|f| dir.join(f).exists())
 }
 
 /// Recursively compute directory size in bytes.
