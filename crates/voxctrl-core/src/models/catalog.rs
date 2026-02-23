@@ -79,7 +79,7 @@ pub fn all_models() -> Vec<ModelInfo> {
             display_name: "Voxtral Mini 4B".into(),
             backend: ModelBackend::Voxtral,
             category: ModelCategory::Stt,
-            hf_repo: Some("mistralai/Voxtral-Mini-3B-2507".into()),
+            hf_repo: Some("mistralai/Voxtral-Mini-4B-Realtime-2602".into()),
             hf_files: vec![
                 "config.json".into(),
                 "consolidated.safetensors".into(),

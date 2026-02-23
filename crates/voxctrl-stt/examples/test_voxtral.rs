@@ -10,7 +10,7 @@ fn main() -> anyhow::Result<()> {
     let wav_path = PathBuf::from(&wav_path);
 
     let model_dir = cache_scanner::find_hf_model(
-        "mistralai/Voxtral-Mini-3B-2507",
+        "mistralai/Voxtral-Mini-4B-Realtime-2602",
         &["consolidated.safetensors"],
     );
 
