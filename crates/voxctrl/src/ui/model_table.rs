@@ -1182,8 +1182,13 @@ impl SettingsApp {
                         }
                     } else if self.test.stt_status == "Transcribing..." {
                         ui.add_enabled(false, egui::Button::new("Transcribing..."));
-                    } else if ui.button("Record").clicked() {
-                        self.start_test_recording(&cfg);
+                    } else {
+                        if ui.button("Record").clicked() {
+                            self.start_test_recording(&cfg);
+                        }
+                        if ui.button("Load File...").clicked() {
+                            self.load_audio_file_and_transcribe(&cfg);
+                        }
                     }
                 });
             });
@@ -1340,6 +1345,67 @@ impl SettingsApp {
 
         std::thread::spawn(move || {
             match transcribe_chunks(&chunks, sample_rate, &stt_cfg) {
+                Ok(text) => {
+                    *result_writer.lock().unwrap() = Some(text);
+                    *status_writer.lock().unwrap() = Some("Done".into());
+                }
+                Err(e) => {
+                    *result_writer.lock().unwrap() = Some(String::new());
+                    *status_writer.lock().unwrap() = Some(format!("STT error: {e}"));
+                }
+            }
+        });
+    }
+
+    fn load_audio_file_and_transcribe(&mut self, cfg: &config::Config) {
+        let path = rfd::FileDialog::new()
+            .add_filter("WAV audio", &["wav"])
+            .pick_file();
+        let path = match path {
+            Some(p) => p,
+            None => return,
+        };
+
+        self.test.stt_status = format!("Transcribing {}...", path.file_name().unwrap_or_default().to_string_lossy());
+        self.test.stt_result.clear();
+
+        // Read WAV and extract f32 PCM samples.
+        let samples = match (|| -> anyhow::Result<Vec<f32>> {
+            let reader = hound::WavReader::open(&path)?;
+            let spec = reader.spec();
+            if spec.channels != 1 {
+                anyhow::bail!("Expected mono WAV, got {} channels", spec.channels);
+            }
+            let samples: Vec<f32> = if spec.bits_per_sample == 16 {
+                reader
+                    .into_samples::<i16>()
+                    .map(|s| s.map(|v| v as f32 / 32768.0))
+                    .collect::<Result<_, _>>()?
+            } else {
+                reader.into_samples::<f32>().collect::<Result<_, _>>()?
+            };
+            Ok(samples)
+        })() {
+            Ok(s) => s,
+            Err(e) => {
+                self.test.stt_status = format!("Load error: {e}");
+                return;
+            }
+        };
+
+        let stt_cfg = cfg.stt.clone();
+        let sample_rate = cfg.audio.sample_rate;
+
+        let result_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let status_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let result_writer = Arc::clone(&result_slot);
+        let status_writer = Arc::clone(&status_slot);
+
+        self.test.stt_result_slot = Some(result_slot);
+        self.test.stt_status_slot = Some(status_slot);
+
+        std::thread::spawn(move || {
+            match transcribe_chunks(&samples, sample_rate, &stt_cfg) {
                 Ok(text) => {
                     *result_writer.lock().unwrap() = Some(text);
                     *status_writer.lock().unwrap() = Some("Done".into());
@@ -1524,6 +1590,16 @@ fn transcribe_chunks(
     sample_rate: u32,
     stt_cfg: &config::SttConfig,
 ) -> anyhow::Result<String> {
+    // Log audio stats before writing WAV
+    let (cmin, cmax) = chunks.iter().fold((f32::MAX, f32::MIN), |(mn, mx), &v| (mn.min(v), mx.max(v)));
+    let cmean: f64 = chunks.iter().map(|&v| v as f64).sum::<f64>() / chunks.len().max(1) as f64;
+    let rms: f64 = (chunks.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / chunks.len().max(1) as f64).sqrt();
+    log::info!(
+        "[testbed] transcribe_chunks: {} samples, rate={}, duration={:.2}s, min={:.4}, max={:.4}, mean={:.6}, rms={:.6}",
+        chunks.len(), sample_rate, chunks.len() as f64 / sample_rate as f64,
+        cmin, cmax, cmean, rms
+    );
+
     let tmp = tempfile::Builder::new()
         .suffix(".wav")
         .tempfile()?;
@@ -1542,15 +1618,29 @@ fn transcribe_chunks(
     }
     writer.finalize()?;
 
-    // voxtral-http talks directly to an external llama-server over HTTP.
-    // All other backends route through the main app's named-pipe STT server,
-    // which owns the pipeline and loaded models.
-    if stt_cfg.backend.contains("-http") {
-        let transcriber = voxctrl_core::stt::create_transcriber(stt_cfg, None, None)?;
-        transcriber.transcribe(tmp.path())
-    } else {
-        let wav_data = std::fs::read(tmp.path())?;
-        voxctrl_core::stt_client::transcribe_via_server(&wav_data)
+    let wav_size = std::fs::metadata(tmp.path()).map(|m| m.len()).unwrap_or(0);
+    log::info!("[testbed] WAV written: {:?}, {} bytes", tmp.path(), wav_size);
+
+    // Try the named-pipe STT server first (main process owns the pipeline).
+    // If that fails (e.g. main process not running), fall back to creating
+    // a local transcriber directly.
+    log::info!("[testbed] Trying STT via named-pipe server...");
+    let wav_data = std::fs::read(tmp.path())?;
+    match voxctrl_core::stt_client::transcribe_via_server(&wav_data) {
+        Ok(text) => {
+            log::info!("[testbed] Server transcription OK: {:?}", text);
+            Ok(text)
+        }
+        Err(server_err) => {
+            log::warn!("[testbed] Server unavailable ({server_err:#}), trying direct transcriber...");
+            let transcriber = voxctrl_core::stt::create_transcriber(stt_cfg, None, Some(&voxctrl_stt::stt_factory))?;
+            let result = transcriber.transcribe(tmp.path());
+            match &result {
+                Ok(text) => log::info!("[testbed] Direct transcription OK: {:?}", text),
+                Err(e) => log::error!("[testbed] Direct transcription failed: {e:#}"),
+            }
+            result
+        }
     }
 }
 

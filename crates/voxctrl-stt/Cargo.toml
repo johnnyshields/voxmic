@@ -37,3 +37,11 @@ byteorder           = { version = "1", optional = true }
 # STT: voxtral-native (optional) — pure Rust Voxtral via Burn ML framework
 voxtral-mini-realtime = { git = "https://github.com/TrevorS/voxtral-mini-realtime-rs", default-features = false, features = ["hub", "native-tokenizer", "wgpu"], optional = true }
 burn = { version = "0.20", default-features = false, features = ["wgpu"], optional = true }
+
+[dev-dependencies]
+env_logger = "0.11"
+dirs = "5"
+
+[[example]]
+name = "test_whisper"
+required-features = ["stt-whisper-native"]

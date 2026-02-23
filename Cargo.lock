@@ -8408,6 +8408,8 @@ dependencies = [
  "candle-core 0.8.4",
  "candle-nn",
  "candle-transformers",
+ "dirs 5.0.1",
+ "env_logger",
  "hf-hub 0.3.2",
  "hound",
  "log",
