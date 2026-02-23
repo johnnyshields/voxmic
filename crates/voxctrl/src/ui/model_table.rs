@@ -241,7 +241,7 @@ pub struct SettingsApp {
     // Editable config fields
     available_devices: Vec<String>,
     selected_device: String,
-    hotkey_shortcut: String,
+    hotkey_dict_shortcut: String,
     hotkey_cu_shortcut: String,
     stt_backend: String,
     whisper_model: String,
@@ -302,7 +302,7 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
     let registry = Arc::new(Mutex::new(registry));
     let include_super = cfg
         .hotkey
-        .shortcut
+        .dict_shortcut
         .to_lowercase()
         .split('+')
         .any(|t| matches!(t.trim(), "super" | "win" | "meta" | "cmd"));
@@ -315,7 +315,7 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
         test: TestState::default(),
         available_devices: voxctrl_core::audio::list_input_devices(),
         selected_device: cfg.audio.device_pattern.clone(),
-        hotkey_shortcut: cfg.hotkey.shortcut.clone(),
+        hotkey_dict_shortcut: cfg.hotkey.dict_shortcut.clone(),
         hotkey_cu_shortcut: cfg.hotkey.cu_shortcut.clone().unwrap_or_default(),
         stt_backend: cfg.stt.backend.clone(),
         whisper_model: cfg.stt.whisper_model.clone(),
@@ -391,7 +391,7 @@ impl eframe::App for SettingsApp {
                 Some(None) => self.capture_state = CaptureState::Idle,
                 Some(Some(shortcut)) => {
                     match self.capture_target {
-                        CaptureTarget::Dictation => self.hotkey_shortcut = shortcut,
+                        CaptureTarget::Dictation => self.hotkey_dict_shortcut = shortcut,
                         CaptureTarget::ComputerUse => self.hotkey_cu_shortcut = shortcut,
                     }
                     self.capture_state = CaptureState::Idle;
@@ -531,19 +531,19 @@ impl SettingsApp {
                             self.capture_state = CaptureState::Idle;
                         }
                     } else {
-                        let label = if self.hotkey_shortcut.is_empty() {
+                        let label = if self.hotkey_dict_shortcut.is_empty() {
                             "Click to set hotkey..."
                         } else {
-                            &self.hotkey_shortcut
+                            &self.hotkey_dict_shortcut
                         };
                         let enabled = self.capture_state == CaptureState::Idle;
                         if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                             self.capture_state = CaptureState::Listening;
                             self.capture_target = CaptureTarget::Dictation;
                         }
-                        if !self.hotkey_shortcut.is_empty() && ui.small_button("\u{2715}").clicked()
+                        if !self.hotkey_dict_shortcut.is_empty() && ui.small_button("\u{2715}").clicked()
                         {
-                            self.hotkey_shortcut.clear();
+                            self.hotkey_dict_shortcut.clear();
                         }
                     }
                 });
@@ -553,7 +553,7 @@ impl SettingsApp {
                 ui.label("");
                 let old_super = self.hotkey_include_super;
                 ui.checkbox(&mut self.hotkey_include_super, "Include Super/Win key");
-                if self.hotkey_include_super != old_super && !self.hotkey_shortcut.is_empty() {
+                if self.hotkey_include_super != old_super && !self.hotkey_dict_shortcut.is_empty() {
                     self.toggle_super_in_shortcut();
                 }
                 ui.end_row();
@@ -717,7 +717,7 @@ impl SettingsApp {
     fn toggle_super_in_shortcut(&mut self) {
         if self.hotkey_include_super {
             // Insert Super before the final (key) token
-            let parts: Vec<&str> = self.hotkey_shortcut.split('+').collect();
+            let parts: Vec<&str> = self.hotkey_dict_shortcut.split('+').collect();
             let mut new_parts = Vec::with_capacity(parts.len() + 1);
             for (i, part) in parts.iter().enumerate() {
                 if i == parts.len() - 1 {
@@ -725,11 +725,11 @@ impl SettingsApp {
                 }
                 new_parts.push(part);
             }
-            self.hotkey_shortcut = new_parts.join("+");
+            self.hotkey_dict_shortcut = new_parts.join("+");
         } else {
             // Remove Super/Win/Meta/Cmd tokens
-            self.hotkey_shortcut = self
-                .hotkey_shortcut
+            self.hotkey_dict_shortcut = self
+                .hotkey_dict_shortcut
                 .split('+')
                 .filter(|t| {
                     !matches!(
@@ -745,7 +745,7 @@ impl SettingsApp {
     fn save_config(&mut self) {
         let mut cfg = config::load_config();
         cfg.audio.device_pattern = self.selected_device.clone();
-        cfg.hotkey.shortcut = self.hotkey_shortcut.clone();
+        cfg.hotkey.dict_shortcut = self.hotkey_dict_shortcut.clone();
         cfg.hotkey.cu_shortcut = if self.hotkey_cu_shortcut.is_empty() {
             None
         } else {
@@ -881,7 +881,7 @@ impl SettingsApp {
             if self.test.hotkey_bypass {
                 ui.colored_label(egui::Color32::YELLOW, "Bypassed — hotkey step skipped");
                 self.test.hotkey_detected = true;
-            } else if self.hotkey_shortcut.is_empty() {
+            } else if self.hotkey_dict_shortcut.is_empty() {
                 ui.label("No hotkey configured. Set one in the Settings tab.");
             } else if let Some(ref error) = self.test_hotkey_error {
                 ui.colored_label(egui::Color32::RED, error);
@@ -1241,11 +1241,11 @@ impl SettingsApp {
         self.test_hotkey = None;
         self.test_hotkey_error = None;
 
-        if self.hotkey_shortcut.is_empty() {
+        if self.hotkey_dict_shortcut.is_empty() {
             return;
         }
 
-        let hotkey: HotKey = match crate::hotkey::parse_shortcut(&self.hotkey_shortcut) {
+        let hotkey: HotKey = match crate::hotkey::parse_shortcut(&self.hotkey_dict_shortcut) {
             Ok(hk) => hk,
             Err(e) => {
                 self.test_hotkey_error = Some(format!("Invalid hotkey: {e}"));
