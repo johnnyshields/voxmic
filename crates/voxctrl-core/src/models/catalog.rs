@@ -9,6 +9,7 @@ pub enum ModelBackend {
 pub enum ModelCategory {
     Stt,
     Vad,
+    ComputerUse,
 }
 
 impl std::fmt::Display for ModelCategory {
@@ -16,6 +17,7 @@ impl std::fmt::Display for ModelCategory {
         match self {
             ModelCategory::Stt => write!(f, "STT"),
             ModelCategory::Vad => write!(f, "VAD"),
+            ModelCategory::ComputerUse => write!(f, "CU"),
         }
     }
 }
@@ -128,4 +130,16 @@ pub fn required_vad_model_id(vad_backend: &str) -> Option<String> {
 /// Determine which STT model ID is required by the current config.
 pub fn required_model_id(cfg: &Config) -> Option<String> {
     required_stt_model_id(&cfg.stt.backend, &cfg.stt.whisper_model)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_category_display() {
+        assert_eq!(ModelCategory::Stt.to_string(), "STT");
+        assert_eq!(ModelCategory::Vad.to_string(), "VAD");
+        assert_eq!(ModelCategory::ComputerUse.to_string(), "CU");
+    }
 }

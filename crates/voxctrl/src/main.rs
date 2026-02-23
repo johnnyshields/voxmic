@@ -292,45 +292,53 @@ fn run() -> Result<()> {
     // ZLUDA DLL management (only when zluda feature compiled in)
     #[cfg(feature = "zluda")]
     {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
         if gpu_mode == voxctrl_core::gpu::GpuMode::Zluda {
             let zluda_dir = cfg.gpu.zluda_dir.clone()
                 .or_else(voxctrl_core::gpu::zluda::default_zluda_dir)
                 .unwrap_or_else(|| std::path::PathBuf::from("zluda"));
 
             let status = voxctrl_core::gpu::zluda::check_zluda(&zluda_dir);
-            match status {
+            let zluda_available = match status {
                 voxctrl_core::gpu::zluda::ZludaStatus::Installed(ref p) => {
                     log::info!("ZLUDA found at {}", p.display());
-                    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-                        if let Err(e) = voxctrl_core::gpu::zluda::install_zluda_dlls(&zluda_dir, &exe_dir) {
-                            log::error!("Failed to install ZLUDA DLLs: {e}");
-                        }
-                    }
+                    true
                 }
                 voxctrl_core::gpu::zluda::ZludaStatus::NotInstalled if cfg.gpu.zluda_auto_download => {
                     log::info!("ZLUDA not found, downloading...");
                     match voxctrl_core::gpu::zluda::download_zluda(&zluda_dir, |pct| {
                         log::info!("ZLUDA download: {}%", pct);
                     }) {
-                        Ok(_) => {
-                            if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-                                if let Err(e) = voxctrl_core::gpu::zluda::install_zluda_dlls(&zluda_dir, &exe_dir) {
-                                    log::error!("Failed to install ZLUDA DLLs: {e}");
-                                }
-                            }
+                        Ok(_) => true,
+                        Err(e) => {
+                            log::error!("Failed to download ZLUDA: {e}");
+                            false
                         }
-                        Err(e) => log::error!("Failed to download ZLUDA: {e}"),
                     }
                 }
                 _ => {
                     log::info!("ZLUDA not available (status: {})", status);
+                    false
+                }
+            };
+
+            if zluda_available {
+                if let Some(ref exe_dir) = exe_dir {
+                    if let Err(e) = voxctrl_core::gpu::zluda::install_zluda_dlls(&zluda_dir, exe_dir) {
+                        log::error!("Failed to install ZLUDA DLLs: {e}");
+                    }
                 }
             }
         } else if voxctrl_core::gpu::zluda::is_zluda_active() {
             // Clean up stale ZLUDA DLLs when not in ZLUDA mode
             log::info!("Removing stale ZLUDA DLLs (not in ZLUDA mode)");
-            if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-                let _ = voxctrl_core::gpu::zluda::uninstall_zluda_dlls(&exe_dir);
+            if let Some(ref exe_dir) = exe_dir {
+                if let Err(e) = voxctrl_core::gpu::zluda::uninstall_zluda_dlls(exe_dir) {
+                    log::warn!("Failed to uninstall ZLUDA DLLs: {e}");
+                }
             }
         }
     }

@@ -3,8 +3,7 @@
 #[cfg(feature = "zluda")]
 pub mod zluda;
 
-use crate::config::GpuConfig;
-use std::path::Path;
+use crate::config::{GpuBackend, GpuConfig};
 
 // ── GPU hardware detection ───────────────────────────────────────────────
 
@@ -37,9 +36,14 @@ pub struct GpuInfo {
 /// Detect GPUs by probing for vendor driver DLLs in System32.
 ///
 /// This is a lightweight check — no GPU API initialization required.
+/// Returns an empty list on non-Windows platforms.
+#[cfg(windows)]
 pub fn detect_gpus() -> Vec<GpuInfo> {
+    use std::path::Path;
+
     let mut gpus = Vec::new();
-    let sys32 = Path::new("C:\\Windows\\System32");
+    let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| "C:\\Windows".into());
+    let sys32 = Path::new(&sys_root).join("System32");
 
     // NVIDIA: nvcuda.dll (CUDA driver) or nvapi64.dll
     if sys32.join("nvcuda.dll").exists() || sys32.join("nvapi64.dll").exists() {
@@ -69,6 +73,11 @@ pub fn detect_gpus() -> Vec<GpuInfo> {
     }
 
     gpus
+}
+
+#[cfg(not(windows))]
+pub fn detect_gpus() -> Vec<GpuInfo> {
+    Vec::new()
 }
 
 // ── GPU mode resolution ──────────────────────────────────────────────────
@@ -102,18 +111,18 @@ impl std::fmt::Display for GpuMode {
 
 /// Resolve the GPU mode from config + detected hardware.
 ///
-/// When `backend` is `"auto"`:
+/// When `backend` is `Auto`:
 /// - NVIDIA detected → Cuda
 /// - AMD detected → Zluda
 /// - Otherwise → Cpu
 pub fn resolve_gpu_mode(cfg: &GpuConfig, gpus: &[GpuInfo]) -> GpuMode {
-    match cfg.backend.as_str() {
-        "cuda" => GpuMode::Cuda,
-        "zluda" => GpuMode::Zluda,
-        "directml" => GpuMode::DirectMl,
-        "wgpu" => GpuMode::Wgpu,
-        "cpu" => GpuMode::Cpu,
-        "auto" | _ => auto_resolve(gpus),
+    match cfg.backend {
+        GpuBackend::Cuda => GpuMode::Cuda,
+        GpuBackend::Zluda => GpuMode::Zluda,
+        GpuBackend::DirectMl => GpuMode::DirectMl,
+        GpuBackend::Wgpu => GpuMode::Wgpu,
+        GpuBackend::Cpu => GpuMode::Cpu,
+        GpuBackend::Auto => auto_resolve(gpus),
     }
 }
 
@@ -147,37 +156,56 @@ pub fn gpu_mode_to_whisper_device(mode: GpuMode) -> &'static str {
 mod tests {
     use super::*;
 
+    fn auto_cfg() -> GpuConfig {
+        GpuConfig { backend: GpuBackend::Auto, device_id: 0, zluda_dir: None, zluda_auto_download: true }
+    }
+
     #[test]
     fn test_auto_nvidia() {
         let gpus = vec![GpuInfo { vendor: GpuVendor::Nvidia, name: "RTX 4090".into(), device_id: 0 }];
-        let cfg = GpuConfig { backend: "auto".into(), device_id: 0, zluda_dir: None, zluda_auto_download: true };
-        assert_eq!(resolve_gpu_mode(&cfg, &gpus), GpuMode::Cuda);
+        assert_eq!(resolve_gpu_mode(&auto_cfg(), &gpus), GpuMode::Cuda);
     }
 
     #[test]
     fn test_auto_amd() {
         let gpus = vec![GpuInfo { vendor: GpuVendor::Amd, name: "RX 7900".into(), device_id: 0 }];
-        let cfg = GpuConfig { backend: "auto".into(), device_id: 0, zluda_dir: None, zluda_auto_download: true };
-        assert_eq!(resolve_gpu_mode(&cfg, &gpus), GpuMode::Zluda);
+        assert_eq!(resolve_gpu_mode(&auto_cfg(), &gpus), GpuMode::Zluda);
     }
 
     #[test]
     fn test_auto_no_gpu() {
-        let cfg = GpuConfig { backend: "auto".into(), device_id: 0, zluda_dir: None, zluda_auto_download: true };
-        assert_eq!(resolve_gpu_mode(&cfg, &[]), GpuMode::Cpu);
+        assert_eq!(resolve_gpu_mode(&auto_cfg(), &[]), GpuMode::Cpu);
+    }
+
+    #[test]
+    fn test_auto_intel_only() {
+        let gpus = vec![GpuInfo { vendor: GpuVendor::Intel, name: "Intel UHD 770".into(), device_id: 0 }];
+        assert_eq!(resolve_gpu_mode(&auto_cfg(), &gpus), GpuMode::Cpu);
     }
 
     #[test]
     fn test_explicit_cuda() {
-        let cfg = GpuConfig { backend: "cuda".into(), device_id: 0, zluda_dir: None, zluda_auto_download: true };
+        let cfg = GpuConfig { backend: GpuBackend::Cuda, ..auto_cfg() };
         assert_eq!(resolve_gpu_mode(&cfg, &[]), GpuMode::Cuda);
     }
 
     #[test]
     fn test_explicit_cpu() {
-        let cfg = GpuConfig { backend: "cpu".into(), device_id: 0, zluda_dir: None, zluda_auto_download: true };
+        let cfg = GpuConfig { backend: GpuBackend::Cpu, ..auto_cfg() };
         let gpus = vec![GpuInfo { vendor: GpuVendor::Nvidia, name: "RTX 4090".into(), device_id: 0 }];
         assert_eq!(resolve_gpu_mode(&cfg, &gpus), GpuMode::Cpu);
+    }
+
+    #[test]
+    fn test_explicit_directml() {
+        let cfg = GpuConfig { backend: GpuBackend::DirectMl, ..auto_cfg() };
+        assert_eq!(resolve_gpu_mode(&cfg, &[]), GpuMode::DirectMl);
+    }
+
+    #[test]
+    fn test_explicit_wgpu() {
+        let cfg = GpuConfig { backend: GpuBackend::Wgpu, ..auto_cfg() };
+        assert_eq!(resolve_gpu_mode(&cfg, &[]), GpuMode::Wgpu);
     }
 
     #[test]
@@ -186,8 +214,7 @@ mod tests {
             GpuInfo { vendor: GpuVendor::Amd, name: "RX 7900".into(), device_id: 0 },
             GpuInfo { vendor: GpuVendor::Nvidia, name: "RTX 4090".into(), device_id: 1 },
         ];
-        let cfg = GpuConfig { backend: "auto".into(), device_id: 0, zluda_dir: None, zluda_auto_download: true };
-        assert_eq!(resolve_gpu_mode(&cfg, &gpus), GpuMode::Cuda);
+        assert_eq!(resolve_gpu_mode(&auto_cfg(), &gpus), GpuMode::Cuda);
     }
 
     #[test]
@@ -196,5 +223,27 @@ mod tests {
         assert_eq!(gpu_mode_to_whisper_device(GpuMode::Zluda), "cuda");
         assert_eq!(gpu_mode_to_whisper_device(GpuMode::Cpu), "cpu");
         assert_eq!(gpu_mode_to_whisper_device(GpuMode::Wgpu), "cpu");
+    }
+
+    #[test]
+    fn test_gpu_backend_serde_roundtrip() {
+        for variant in [
+            GpuBackend::Auto,
+            GpuBackend::Cuda,
+            GpuBackend::Zluda,
+            GpuBackend::DirectMl,
+            GpuBackend::Wgpu,
+            GpuBackend::Cpu,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let parsed: GpuBackend = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, variant, "roundtrip failed for {json}");
+        }
+    }
+
+    #[test]
+    fn test_gpu_backend_unknown_deserialize() {
+        let result = serde_json::from_str::<GpuBackend>("\"vulkan\"");
+        assert!(result.is_err(), "unknown backend string should fail to deserialize");
     }
 }

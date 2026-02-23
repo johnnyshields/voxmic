@@ -2,7 +2,41 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
+
+// ── GPU backend enum ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuBackend {
+    Auto,
+    Cuda,
+    Zluda,
+    #[serde(rename = "directml")]
+    DirectMl,
+    Wgpu,
+    Cpu,
+}
+
+impl Default for GpuBackend {
+    fn default() -> Self {
+        GpuBackend::Auto
+    }
+}
+
+impl fmt::Display for GpuBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GpuBackend::Auto => write!(f, "auto"),
+            GpuBackend::Cuda => write!(f, "cuda"),
+            GpuBackend::Zluda => write!(f, "zluda"),
+            GpuBackend::DirectMl => write!(f, "directml"),
+            GpuBackend::Wgpu => write!(f, "wgpu"),
+            GpuBackend::Cpu => write!(f, "cpu"),
+        }
+    }
+}
 
 // ── Sub-configs for each pipeline stage ────────────────────────────────────
 
@@ -92,6 +126,9 @@ pub struct ActionConfig {
     /// Include screenshots in agent context (default: false).
     #[serde(default)]
     pub cu_include_screenshots: Option<bool>,
+    /// Computer-use provider type (default: "anthropic").
+    #[serde(default = "default_cu_provider_type")]
+    pub cu_provider_type: String,
 }
 
 impl Default for ActionConfig {
@@ -103,6 +140,7 @@ impl Default for ActionConfig {
             cu_max_iterations: None,
             cu_max_tree_depth: None,
             cu_include_screenshots: None,
+            cu_provider_type: default_cu_provider_type(),
         }
     }
 }
@@ -155,9 +193,9 @@ pub struct ModelsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuConfig {
-    /// GPU backend: "auto", "cuda", "zluda", "directml", "wgpu", "cpu"
-    #[serde(default = "default_gpu_backend")]
-    pub backend: String,
+    /// GPU backend selection.
+    #[serde(default)]
+    pub backend: GpuBackend,
     /// CUDA/ZLUDA device ordinal.
     #[serde(default)]
     pub device_id: u32,
@@ -172,7 +210,7 @@ pub struct GpuConfig {
 impl Default for GpuConfig {
     fn default() -> Self {
         Self {
-            backend: default_gpu_backend(),
+            backend: GpuBackend::default(),
             device_id: 0,
             zluda_dir: None,
             zluda_auto_download: default_zluda_auto_download(),
@@ -229,11 +267,11 @@ fn default_energy_threshold() -> f64 { 0.015 }
 fn default_silero_threshold() -> f32 { 0.5 }
 fn default_router_backend() -> String { "passthrough".into() }
 fn default_action_backend() -> String { "type-text".into() }
+fn default_cu_provider_type() -> String { "anthropic".into() }
 fn default_hotkey_shortcut() -> String { "Ctrl+Super+Space".into() }
 fn default_device_pattern() -> String { "DJI".into() }
 fn default_sample_rate() -> u32 { 16000 }
 fn default_chunk_duration_ms() -> u32 { 100 }
-fn default_gpu_backend() -> String { "auto".into() }
 fn default_zluda_auto_download() -> bool { true }
 
 // ── Load / save ────────────────────────────────────────────────────────────
@@ -390,7 +428,7 @@ mod tests {
     #[test]
     fn test_gpu_config_defaults() {
         let cfg = Config::default();
-        assert_eq!(cfg.gpu.backend, "auto");
+        assert_eq!(cfg.gpu.backend, GpuBackend::Auto);
         assert_eq!(cfg.gpu.device_id, 0);
         assert!(cfg.gpu.zluda_dir.is_none());
         assert!(cfg.gpu.zluda_auto_download);
@@ -398,10 +436,46 @@ mod tests {
 
     #[test]
     fn test_nested_config_roundtrip() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        cfg.action.cu_provider_type = "openai".into();
         let json = serde_json::to_string_pretty(&cfg).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.stt.backend, cfg.stt.backend);
         assert_eq!(parsed.audio.sample_rate, cfg.audio.sample_rate);
+        assert_eq!(parsed.action.cu_provider_type, cfg.action.cu_provider_type);
+    }
+
+    #[test]
+    fn test_action_config_defaults() {
+        let action = ActionConfig::default();
+        assert_eq!(action.cu_provider_type, "anthropic");
+        assert_eq!(action.backend, "type-text");
+        assert!(action.cu_model.is_none());
+        assert!(action.cu_api_base_url.is_none());
+        assert!(action.cu_max_iterations.is_none());
+        assert!(action.cu_max_tree_depth.is_none());
+        assert!(action.cu_include_screenshots.is_none());
+    }
+
+    #[test]
+    fn test_action_config_roundtrip() {
+        let action = ActionConfig {
+            backend: "computer-use".into(),
+            cu_provider_type: "openai".into(),
+            cu_model: Some("gpt-4".into()),
+            cu_api_base_url: Some("https://api.openai.com".into()),
+            cu_max_iterations: Some(20),
+            cu_max_tree_depth: Some(12),
+            cu_include_screenshots: Some(true),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        let parsed: ActionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.backend, "computer-use");
+        assert_eq!(parsed.cu_provider_type, "openai");
+        assert_eq!(parsed.cu_model.as_deref(), Some("gpt-4"));
+        assert_eq!(parsed.cu_api_base_url.as_deref(), Some("https://api.openai.com"));
+        assert_eq!(parsed.cu_max_iterations, Some(20));
+        assert_eq!(parsed.cu_max_tree_depth, Some(12));
+        assert_eq!(parsed.cu_include_screenshots, Some(true));
     }
 }

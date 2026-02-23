@@ -255,4 +255,18 @@ mod tests {
         assert_eq!(ZludaStatus::NotInstalled.to_string(), "Not installed");
         assert_eq!(ZludaStatus::Downloading.to_string(), "Downloading...");
     }
+
+    #[test]
+    fn test_is_zluda_active_returns_bool() {
+        // Just call it and confirm no panic — the result depends on the
+        // test environment but the function must not crash.
+        let _active: bool = is_zluda_active();
+    }
+
+    #[test]
+    fn test_uninstall_no_dlls() {
+        let dir = tempfile::tempdir().unwrap();
+        // Uninstalling from an empty directory should succeed (no-op).
+        uninstall_zluda_dlls(dir.path()).unwrap();
+    }
 }
