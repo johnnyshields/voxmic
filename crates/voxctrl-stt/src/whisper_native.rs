@@ -5,8 +5,6 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use byteorder::{ByteOrder, LittleEndian};
 use candle_core::{DType, Device, IndexOp, Tensor};
@@ -20,6 +18,9 @@ use voxctrl_core::config::SttConfig;
 
 const MAX_DECODE_TOKENS: usize = 224;
 
+/// Maximum consecutive repetitions of the same token before forcing EOT.
+const MAX_TOKEN_REPEATS: usize = 3;
+
 // Fallback token IDs for the standard Whisper tokenizer. Used when
 // `tokenizer.token_to_id()` returns `None` (e.g. a stripped or
 // incompatible tokenizer file).
@@ -31,20 +32,26 @@ const FALLBACK_NO_TIMESTAMPS_TOKEN: u32 = 50363;
 // ── Transcriber ─────────────────────────────────────────────────────────────
 
 /// Pure-Rust Whisper transcriber backed by the candle framework.
+///
+/// Stores the `VarBuilder` (mmapped weights via Arc) and `Config` instead of a
+/// persistent `Whisper` model. A fresh model is constructed for each inference
+/// call, guaranteeing zero mutable-state leakage between calls. Weight tensors
+/// are shared via Arc so reconstruction is ~O(1).
 pub struct WhisperNativeTranscriber {
-    model: Mutex<m::model::Whisper>,
+    vb: VarBuilder<'static>,
     config: m::Config,
     tokenizer: Tokenizer,
     device: Device,
     mel_filters: Vec<f32>,
     language_token: Option<u32>,
+    /// Whether the language is English (enables non-Latin hallucination detection).
+    language_is_english: bool,
     sot_token: u32,
     eot_token: u32,
     transcribe_token: u32,
     no_timestamps_token: u32,
     suppress_mask: Tensor,
     begin_suppress_mask: Tensor,
-    inference_count: AtomicU64,
 }
 
 impl WhisperNativeTranscriber {
@@ -106,7 +113,6 @@ impl WhisperNativeTranscriber {
         );
         let vb =
             unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], DType::F32, &device)? };
-        let model = m::model::Whisper::load(&vb, config.clone())?;
 
         // Look up special tokens from the tokenizer.
         let sot_token = tokenizer
@@ -134,6 +140,8 @@ impl WhisperNativeTranscriber {
                 FALLBACK_NO_TIMESTAMPS_TOKEN
             });
 
+        let language_is_english = cfg.whisper_language.as_deref() == Some("en");
+
         let language_token = cfg.whisper_language.as_ref().and_then(|lang| {
             let tag = format!("<|{lang}|>");
             tokenizer.token_to_id(&tag)
@@ -158,51 +166,52 @@ impl WhisperNativeTranscriber {
             begin_suppress_tokens
         );
 
+        // Verify model loads correctly before committing to this VarBuilder.
+        let _verify = m::model::Whisper::load(&vb, config.clone())?;
+        drop(_verify);
+
         log::info!("WhisperNativeTranscriber: ready ({} suppress tokens)", suppress_tokens.len());
         Ok(Self {
-            model: Mutex::new(model),
+            vb,
             config,
             tokenizer,
             device,
             mel_filters,
             language_token,
+            language_is_english,
             sot_token,
             eot_token,
             transcribe_token,
             no_timestamps_token,
             suppress_mask,
             begin_suppress_mask,
-            inference_count: AtomicU64::new(0),
         })
     }
 
     /// Core inference: takes raw f32 PCM samples at any sample rate, resamples to 16 kHz,
     /// runs mel spectrogram + encoder + greedy decode, and returns the transcribed text.
+    ///
+    /// A fresh `Whisper` model is constructed from the shared `VarBuilder` on each
+    /// call, guaranteeing no mutable state carries over between inferences.
     fn run_inference(&self, samples: &[f32], sample_rate: u32) -> anyhow::Result<String> {
-        let call_num = self.inference_count.fetch_add(1, Ordering::Relaxed);
         let duration_secs = samples.len() as f64 / sample_rate as f64;
         log::info!(
-            "[whisper-dbg] Inference #{}, {} samples, {:.2}s",
-            call_num, samples.len(), duration_secs
+            "[whisper] inference: {} samples, {:.2}s",
+            samples.len(), duration_secs
         );
-        let (amin, amax, amean) = audio_stats(samples);
-        log::debug!(
-            "[whisper-dbg] PCM: {} samples, {:.2}s, min={:.4}, max={:.4}, mean={:.6}",
-            samples.len(), duration_secs, amin, amax, amean
-        );
+
+        if samples.is_empty() {
+            return Ok(String::new());
+        }
+
+        let (amin, amax, _amean) = audio_stats(samples);
         if amax - amin < 1e-6 {
-            log::warn!("[whisper-dbg] Audio appears to be silence/constant!");
+            log::warn!("[whisper] audio appears to be silence/constant");
         }
 
         // ── Resample to 16 kHz if needed ─────────────────────────────
         let samples = if sample_rate != m::SAMPLE_RATE as u32 {
-            let resampled = resample(samples, sample_rate, m::SAMPLE_RATE as u32);
-            log::debug!(
-                "[whisper-dbg] Resampled {}Hz -> {}Hz: {} samples ({:.2}s)",
-                sample_rate, m::SAMPLE_RATE, resampled.len(),
-                resampled.len() as f64 / m::SAMPLE_RATE as f64
-            );
-            resampled
+            resample(samples, sample_rate, m::SAMPLE_RATE as u32)
         } else {
             samples.to_vec()
         };
@@ -212,27 +221,15 @@ impl WhisperNativeTranscriber {
         let n_mel = self.config.num_mel_bins;
         let n_frames = mel.len() / n_mel;
 
-        let (mmin, mmax, mmean) = audio_stats(&mel);
-        log::debug!(
-            "[whisper-dbg] Mel: {} bins x {} frames, mel min={:.4}, max={:.4}, mean={:.4}",
-            n_mel, n_frames, mmin, mmax, mmean
-        );
-
         let mel_tensor = Tensor::from_vec(mel, (1, n_mel, n_frames), &self.device)?;
-        log::debug!("[whisper-dbg] Mel tensor shape: {:?}", mel_tensor.dims());
+
+        // ── Fresh model per inference (zero state leakage) ───────────
+        let mut model = m::model::Whisper::load(&self.vb, self.config.clone())?;
 
         // ── Encode ──────────────────────────────────────────────────────
-        let mut model = self
-            .model
-            .lock()
-            .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
-        model.reset_kv_cache();
         let encoder_output = model.encoder.forward(&mel_tensor, true)?;
-        log::debug!("[whisper-dbg] Encoder output shape: {:?}", encoder_output.dims());
-        let enc_mean = encoder_output.mean_all()?.to_scalar::<f32>()?;
-        log::debug!("[whisper-dbg] Encoder output mean={:.6}", enc_mean);
 
-        // ── Greedy decode ───────────────────────────────────────────────
+        // ── Greedy decode with hallucination guards ─────────────────────
         let mut tokens: Vec<u32> = vec![self.sot_token];
         if let Some(lang) = self.language_token {
             tokens.push(lang);
@@ -240,12 +237,15 @@ impl WhisperNativeTranscriber {
         tokens.push(self.transcribe_token);
         tokens.push(self.no_timestamps_token);
         let prompt_len = tokens.len();
-        log::debug!(
-            "[whisper-dbg] Prompt tokens: {:?} (sot={}, transcribe={}, no_ts={})",
-            tokens, self.sot_token, self.transcribe_token, self.no_timestamps_token
-        );
 
-        for step in 0..MAX_DECODE_TOKENS {
+        // Duration-proportional token limit: short audio can't produce many tokens.
+        let duration_token_limit = (duration_secs * 15.0).max(10.0) as usize;
+        let token_limit = MAX_DECODE_TOKENS.min(duration_token_limit);
+
+        let mut consecutive_repeats: usize = 0;
+        let mut last_token: Option<u32> = None;
+
+        for step in 0..token_limit {
             let flush = step == 0;
 
             let token_t = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
@@ -266,30 +266,43 @@ impl WhisperNativeTranscriber {
                 .to_dtype(DType::U32)?
                 .to_scalar::<u32>()?;
 
-            if step < 10 || step % 50 == 0 {
-                let token_text = self.tokenizer.decode(&[next_token], false).unwrap_or_default();
-                let top_logit = last_logits.max(0)?.to_scalar::<f32>()?;
-                log::debug!(
-                    "[whisper-dbg] Step {}: token={} {:?}, logit={:.2}",
-                    step, next_token, token_text, top_logit
-                );
-            }
-
             if next_token == self.eot_token {
-                log::debug!("[whisper-dbg] EOT at step {}", step);
+                log::debug!("[whisper] EOT at step {}", step);
                 break;
             }
+
+            // ── Hallucination guard: repetition detector ─────────────
+            if last_token == Some(next_token) {
+                consecutive_repeats += 1;
+                if consecutive_repeats >= MAX_TOKEN_REPEATS {
+                    log::warn!(
+                        "[whisper] halting: token {} repeated {} times at step {}",
+                        next_token, consecutive_repeats + 1, step
+                    );
+                    break;
+                }
+            } else {
+                consecutive_repeats = 0;
+            }
+            last_token = Some(next_token);
+
+            // ── Hallucination guard: non-Latin for English ───────────
+            if self.language_is_english {
+                if let Ok(text) = self.tokenizer.decode(&[next_token], false) {
+                    if contains_non_latin(&text) {
+                        log::warn!(
+                            "[whisper] halting: non-Latin token {:?} at step {} (lang=en)",
+                            text, step
+                        );
+                        break;
+                    }
+                }
+            }
+
             tokens.push(next_token);
         }
 
-        drop(model); // release lock before tokenizer decode
-
         let output_tokens: Vec<u32> = tokens[prompt_len..].to_vec();
-        log::debug!(
-            "[whisper-dbg] Output tokens ({}): {:?}",
-            output_tokens.len(),
-            &output_tokens[..output_tokens.len().min(30)]
-        );
 
         let text = self
             .tokenizer
@@ -297,7 +310,7 @@ impl WhisperNativeTranscriber {
             .map_err(|e| anyhow::anyhow!("tokenizer decode: {e}"))?;
         let text = text.trim().to_string();
 
-        log::info!("[whisper-dbg] Inference #{} final text: {:?}", call_num, text);
+        log::info!("[whisper] result: {:?}", text);
         Ok(text)
     }
 
@@ -420,6 +433,19 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 
     let output = output_buf.take_data();
     output[..actual_output_len].to_vec()
+}
+
+/// Returns `true` if `text` contains CJK, Hangul, or other non-Latin script
+/// characters that indicate hallucination when the language is English.
+fn contains_non_latin(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(c,
+            '\u{2E80}'..='\u{9FFF}'  // CJK Radicals Supplement through CJK Unified Ideographs
+            | '\u{AC00}'..='\u{D7AF}' // Hangul Syllables
+            | '\u{3040}'..='\u{30FF}' // Hiragana + Katakana
+            | '\u{1100}'..='\u{11FF}' // Hangul Jamo
+        )
+    })
 }
 
 fn audio_stats(data: &[f32]) -> (f32, f32, f32) {
@@ -723,5 +749,38 @@ mod tests {
                 step1[idx],
             );
         }
+    }
+
+    // ── contains_non_latin tests ────────────────────────────────────────
+
+    #[test]
+    fn contains_non_latin_ascii() {
+        assert!(!contains_non_latin("hello world"));
+        assert!(!contains_non_latin("Hello, World! 123"));
+        assert!(!contains_non_latin(""));
+    }
+
+    #[test]
+    fn contains_non_latin_cjk() {
+        assert!(contains_non_latin("\u{4e16}\u{754c}")); // 世界
+        assert!(contains_non_latin("hello \u{4e16}\u{754c}"));
+    }
+
+    #[test]
+    fn contains_non_latin_hangul() {
+        assert!(contains_non_latin("\u{d55c}\u{ad6d}\u{c5b4}")); // 한국어
+    }
+
+    #[test]
+    fn contains_non_latin_japanese() {
+        assert!(contains_non_latin("\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}")); // こんにちは
+        assert!(contains_non_latin("\u{30ab}\u{30bf}\u{30ab}\u{30ca}")); // カタカナ
+    }
+
+    #[test]
+    fn contains_non_latin_accented_latin() {
+        // Accented Latin characters should NOT trigger the detector.
+        assert!(!contains_non_latin("caf\u{e9}")); // café
+        assert!(!contains_non_latin("\u{fc}ber")); // über
     }
 }
