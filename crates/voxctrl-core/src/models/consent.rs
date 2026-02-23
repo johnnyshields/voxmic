@@ -6,7 +6,7 @@ use crate::models::DownloadStatus;
 
 /// Ensure the model required by the config is available (downloaded).
 /// Shows a consent dialog if the model needs to be downloaded.
-pub fn ensure_model_available(cfg: &Config, registry: &mut ModelRegistry) -> Result<()> {
+pub fn ensure_model_available(cfg: &Config, registry: &ModelRegistry) -> Result<()> {
     let model_id = match required_model_id(cfg) {
         Some(id) => id,
         None => return Ok(()), // No local model required (e.g. HTTP backend)
@@ -30,11 +30,10 @@ pub fn ensure_model_available(cfg: &Config, registry: &mut ModelRegistry) -> Res
     let approved = show_consent_dialog(&display_name, &size);
 
     if approved {
-        log::info!("User approved download of '{display_name}'");
-        if let Some(entry) = registry.get_mut(&model_id) {
-            super::downloader::download_model(entry)?;
-        }
-        Ok(())
+        bail!(
+            "Model '{display_name}' is not downloaded. \
+             Use the Settings panel to download models."
+        )
     } else {
         bail!("User declined download of '{display_name}'")
     }

@@ -1,7 +1,7 @@
 pub mod catalog;
 pub mod cache_scanner;
 pub mod consent;
-pub mod downloader;
+
 
 pub use catalog::ModelCategory;
 pub use catalog::ModelInfo;

@@ -142,4 +142,22 @@ mod tests {
         assert_eq!(ModelCategory::Vad.to_string(), "VAD");
         assert_eq!(ModelCategory::ComputerUse.to_string(), "CU");
     }
+
+    #[test]
+    fn test_silero_catalog_entry() {
+        let models = all_models();
+        let silero = models.iter().find(|m| m.id == "silero/vad-v5")
+            .expect("silero/vad-v5 must be in the catalog");
+
+        assert_eq!(silero.hf_repo.as_deref(), Some("onnx-community/silero-vad"));
+        assert_eq!(silero.hf_files, vec!["onnx/model.onnx"]);
+        assert_eq!(silero.category, ModelCategory::Vad);
+    }
+
+    #[test]
+    fn test_required_vad_model_id_silero() {
+        assert_eq!(required_vad_model_id("silero"), Some("silero/vad-v5".into()));
+        assert_eq!(required_vad_model_id("energy"), None);
+        assert_eq!(required_vad_model_id("none"), None);
+    }
 }
