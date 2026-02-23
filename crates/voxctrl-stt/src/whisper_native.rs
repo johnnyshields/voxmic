@@ -3,6 +3,7 @@
 //! Uses the candle-transformers reference mel spectrogram implementation
 //! with pre-computed mel filter banks from the OpenAI whisper repo.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +19,14 @@ use voxctrl_core::stt::Transcriber;
 use voxctrl_core::config::SttConfig;
 
 const MAX_DECODE_TOKENS: usize = 224;
+
+// Fallback token IDs for the standard Whisper tokenizer. Used when
+// `tokenizer.token_to_id()` returns `None` (e.g. a stripped or
+// incompatible tokenizer file).
+const FALLBACK_SOT_TOKEN: u32 = 50258;
+const FALLBACK_EOT_TOKEN: u32 = 50257;
+const FALLBACK_TRANSCRIBE_TOKEN: u32 = 50359;
+const FALLBACK_NO_TIMESTAMPS_TOKEN: u32 = 50363;
 
 // ── Transcriber ─────────────────────────────────────────────────────────────
 
@@ -102,10 +111,28 @@ impl WhisperNativeTranscriber {
         // Look up special tokens from the tokenizer.
         let sot_token = tokenizer
             .token_to_id("<|startoftranscript|>")
-            .unwrap_or(50258);
-        let eot_token = tokenizer.token_to_id("<|endoftext|>").unwrap_or(50257);
-        let transcribe_token = tokenizer.token_to_id("<|transcribe|>").unwrap_or(50359);
-        let no_timestamps_token = tokenizer.token_to_id("<|notimestamps|>").unwrap_or(50363);
+            .unwrap_or_else(|| {
+                log::warn!("Tokenizer missing <|startoftranscript|>, using fallback {FALLBACK_SOT_TOKEN}");
+                FALLBACK_SOT_TOKEN
+            });
+        let eot_token = tokenizer
+            .token_to_id("<|endoftext|>")
+            .unwrap_or_else(|| {
+                log::warn!("Tokenizer missing <|endoftext|>, using fallback {FALLBACK_EOT_TOKEN}");
+                FALLBACK_EOT_TOKEN
+            });
+        let transcribe_token = tokenizer
+            .token_to_id("<|transcribe|>")
+            .unwrap_or_else(|| {
+                log::warn!("Tokenizer missing <|transcribe|>, using fallback {FALLBACK_TRANSCRIBE_TOKEN}");
+                FALLBACK_TRANSCRIBE_TOKEN
+            });
+        let no_timestamps_token = tokenizer
+            .token_to_id("<|notimestamps|>")
+            .unwrap_or_else(|| {
+                log::warn!("Tokenizer missing <|notimestamps|>, using fallback {FALLBACK_NO_TIMESTAMPS_TOKEN}");
+                FALLBACK_NO_TIMESTAMPS_TOKEN
+            });
 
         let language_token = cfg.whisper_language.as_ref().and_then(|lang| {
             let tag = format!("<|{lang}|>");
@@ -270,7 +297,7 @@ impl WhisperNativeTranscriber {
             .map_err(|e| anyhow::anyhow!("tokenizer decode: {e}"))?;
         let text = text.trim().to_string();
 
-        log::info!("[whisper-dbg] Final text: {:?}", text);
+        log::info!("[whisper-dbg] Inference #{} final text: {:?}", call_num, text);
         Ok(text)
     }
 
@@ -351,12 +378,10 @@ fn build_suppress_token_list(
 
 /// Build a float mask: `-inf` at each position in `suppressed`, `0.0` elsewhere.
 fn build_token_mask(suppressed: &[u32], vocab_size: usize) -> Vec<f32> {
-    // `suppressed` is expected to be sorted (from build_suppress_token_list or small list).
-    let mut sorted = suppressed.to_vec();
-    sorted.sort_unstable();
+    let suppressed_set: HashSet<u32> = suppressed.iter().copied().collect();
     (0..vocab_size)
         .map(|i| {
-            if sorted.binary_search(&(i as u32)).is_ok() {
+            if suppressed_set.contains(&(i as u32)) {
                 f32::NEG_INFINITY
             } else {
                 0.0
@@ -506,7 +531,7 @@ mod tests {
 
     #[test]
     fn build_token_mask_unsorted_input() {
-        // build_token_mask should handle unsorted input (it sorts internally).
+        // build_token_mask handles unsorted input via HashSet.
         let mask = build_token_mask(&[3, 1], 5);
         assert_eq!(mask[1], f32::NEG_INFINITY);
         assert_eq!(mask[3], f32::NEG_INFINITY);
@@ -583,6 +608,119 @@ mod tests {
                 &results[0], result,
                 "inference #{i} differs from #0: {:?} vs {:?}",
                 results[0], result
+            );
+        }
+    }
+
+    // ── HashSet equivalence test (#5) ───────────────────────────────────
+
+    #[test]
+    fn build_token_mask_hashset_equivalence() {
+        // Reference: the old sorted + binary_search implementation.
+        fn build_token_mask_sorted(suppressed: &[u32], vocab_size: usize) -> Vec<f32> {
+            let mut sorted = suppressed.to_vec();
+            sorted.sort_unstable();
+            (0..vocab_size)
+                .map(|i| {
+                    if sorted.binary_search(&(i as u32)).is_ok() {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.0
+                    }
+                })
+                .collect()
+        }
+
+        let vocab_size = 15;
+
+        // Normal unsorted input
+        let tokens = vec![3, 1, 4, 1, 5, 9, 2, 6];
+        assert_eq!(
+            build_token_mask(&tokens, vocab_size),
+            build_token_mask_sorted(&tokens, vocab_size),
+        );
+
+        // Input with duplicates
+        let tokens_dup = vec![5, 5, 5, 3, 3];
+        assert_eq!(
+            build_token_mask(&tokens_dup, vocab_size),
+            build_token_mask_sorted(&tokens_dup, vocab_size),
+        );
+
+        // Empty input
+        assert_eq!(
+            build_token_mask(&[], vocab_size),
+            build_token_mask_sorted(&[], vocab_size),
+        );
+
+        // All tokens suppressed
+        let all: Vec<u32> = (0..vocab_size as u32).collect();
+        assert_eq!(
+            build_token_mask(&all, vocab_size),
+            build_token_mask_sorted(&all, vocab_size),
+        );
+    }
+
+    // ── begin_suppress_mask step-0-only test (#6) ───────────────────────
+
+    #[test]
+    fn begin_suppress_mask_applied_only_on_step_0() {
+        // Simulate the decode loop mask logic with synthetic tensors.
+        let vocab_size = 10;
+
+        // suppress_mask: suppress tokens 2, 5
+        let suppress_mask_vec = build_token_mask(&[2, 5], vocab_size);
+        let suppress_mask =
+            Tensor::from_vec(suppress_mask_vec, vocab_size, &Device::Cpu).unwrap();
+
+        // begin_suppress_mask: additionally suppress tokens 0, 7
+        let begin_suppress_mask_vec = build_token_mask(&[0, 7], vocab_size);
+        let begin_suppress_mask =
+            Tensor::from_vec(begin_suppress_mask_vec, vocab_size, &Device::Cpu).unwrap();
+
+        // Uniform logits (all 1.0)
+        let logits = Tensor::ones(vocab_size, DType::F32, &Device::Cpu).unwrap();
+
+        // Step 0: both masks applied (mirrors the decode loop)
+        let step0_logits = logits.broadcast_add(&suppress_mask).unwrap();
+        let step0_logits = step0_logits.broadcast_add(&begin_suppress_mask).unwrap();
+        let step0: Vec<f32> = step0_logits.to_vec1().unwrap();
+
+        // Tokens 0, 2, 5, 7 should be suppressed
+        for idx in [0, 2, 5, 7] {
+            assert!(
+                step0[idx].is_infinite() && step0[idx].is_sign_negative(),
+                "step 0: token {idx} should be -inf, got {}",
+                step0[idx],
+            );
+        }
+        // Tokens 1, 3, 4, 6, 8, 9 should be untouched
+        for idx in [1, 3, 4, 6, 8, 9] {
+            assert!(
+                (step0[idx] - 1.0).abs() < 1e-6,
+                "step 0: token {idx} should be 1.0, got {}",
+                step0[idx],
+            );
+        }
+
+        // Step 1+: only suppress_mask applied
+        let step1_logits = logits.broadcast_add(&suppress_mask).unwrap();
+        let step1: Vec<f32> = step1_logits.to_vec1().unwrap();
+
+        // Tokens 2, 5 should be suppressed
+        for idx in [2, 5] {
+            assert!(
+                step1[idx].is_infinite() && step1[idx].is_sign_negative(),
+                "step 1+: token {idx} should be -inf, got {}",
+                step1[idx],
+            );
+        }
+        // Tokens 0, 7 should NOT be suppressed (begin_suppress not applied)
+        for idx in [0, 7] {
+            assert!(
+                (step1[idx] - 1.0).abs() < 1e-6,
+                "step 1+: token {idx} should be 1.0, got {}",
+                step1[idx],
             );
         }
     }
