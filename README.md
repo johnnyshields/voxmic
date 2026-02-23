@@ -1,12 +1,13 @@
-# voxtral-mic-win
+# voxctrl
 
-Windows service setup for real-time DJI mic transcription using **faster-whisper** (local, offline, no cloud).
+Multi-platform service for real-time mic transcription and computer use.
 
 ## What it does
 
-- Captures audio from your DJI mic (or any Windows input device)
-- Detects speech via energy-based VAD
-- Transcribes each utterance locally using faster-whisper
+- Captures audio from your DJI mic (or any input device)
+- Detects speech via VAD model or algorithm (RMS, Silero)
+- Transcribes each utterance locally using pluggable STT (Whisper, Voxtral)
+- Generates use computer actions via an LLM
 - Appends timestamped lines to a live transcription log
 
 ## Requirements
@@ -64,3 +65,4 @@ Get-ScheduledTask VoxtralMic | Select TaskName, State
 
 Logs: `C:\workspace\voxtral\logs\`
 Output: `C:\workspace\voxtral\output\transcription.log`
+
