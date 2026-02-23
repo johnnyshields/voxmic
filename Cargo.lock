@@ -8404,6 +8404,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "burn",
+ "byteorder",
  "candle-core 0.8.4",
  "candle-nn",
  "candle-transformers",

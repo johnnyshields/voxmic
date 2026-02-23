@@ -1,11 +1,12 @@
 //! Pure-Rust Whisper backend using candle-core + candle-transformers + hf-hub.
 //!
-//! Downloads the model from Hugging Face Hub on first use and runs inference
-//! entirely in Rust — no C/C++ dependencies required.
+//! Uses the candle-transformers reference mel spectrogram implementation
+//! with pre-computed mel filter banks from the OpenAI whisper repo.
 
 use std::path::Path;
 use std::sync::Mutex;
 
+use byteorder::{ByteOrder, LittleEndian};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::whisper as m;
@@ -15,13 +16,6 @@ use tokenizers::Tokenizer;
 use voxctrl_core::stt::Transcriber;
 use voxctrl_core::config::SttConfig;
 
-// ── Audio constants (match OpenAI whisper) ──────────────────────────────────
-
-const SAMPLE_RATE: usize = 16000;
-const N_FFT: usize = 400;
-const HOP_LENGTH: usize = 160;
-const CHUNK_SECONDS: usize = 30;
-const CHUNK_SAMPLES: usize = CHUNK_SECONDS * SAMPLE_RATE; // 480 000
 const MAX_DECODE_TOKENS: usize = 224;
 
 // ── Transcriber ─────────────────────────────────────────────────────────────
@@ -29,10 +23,10 @@ const MAX_DECODE_TOKENS: usize = 224;
 /// Pure-Rust Whisper transcriber backed by the candle framework.
 pub struct WhisperNativeTranscriber {
     model: Mutex<m::model::Whisper>,
+    config: m::Config,
     tokenizer: Tokenizer,
     device: Device,
     mel_filters: Vec<f32>,
-    n_mels: usize,
     language_token: Option<u32>,
     sot_token: u32,
     eot_token: u32,
@@ -74,19 +68,25 @@ impl WhisperNativeTranscriber {
         };
 
         let config: m::Config = serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
-        let n_mels = config.num_mel_bins;
+
+        // Load pre-computed mel filters (from OpenAI whisper assets, embedded at compile time).
+        let mel_filters = load_mel_filters(config.num_mel_bins)?;
+        log::info!(
+            "WhisperNativeTranscriber: loaded {} mel filters ({} bins)",
+            mel_filters.len(),
+            config.num_mel_bins
+        );
 
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load tokenizer: {e}"))?;
 
         log::info!(
-            "WhisperNativeTranscriber: loading weights ({n_mels} mel bins, device={device:?})"
+            "WhisperNativeTranscriber: loading weights ({} mel bins, device={device:?})",
+            config.num_mel_bins
         );
         let vb =
             unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], DType::F32, &device)? };
-        let model = m::model::Whisper::load(&vb, config)?;
-
-        let mel_filters = compute_mel_filters(n_mels, N_FFT, SAMPLE_RATE as u32);
+        let model = m::model::Whisper::load(&vb, config.clone())?;
 
         // Look up special tokens from the tokenizer.
         let sot_token = tokenizer
@@ -104,10 +104,10 @@ impl WhisperNativeTranscriber {
         log::info!("WhisperNativeTranscriber: ready");
         Ok(Self {
             model: Mutex::new(model),
+            config,
             tokenizer,
             device,
             mel_filters,
-            n_mels,
             language_token,
             sot_token,
             eot_token,
@@ -137,6 +137,21 @@ fn model_to_repo(model: &str) -> String {
     format!("openai/whisper-{model}")
 }
 
+/// Load pre-computed mel filter bank from embedded binary data.
+///
+/// These are the exact same filters used by OpenAI's whisper and by
+/// the candle-transformers reference implementation.
+fn load_mel_filters(num_mel_bins: usize) -> anyhow::Result<Vec<f32>> {
+    let mel_bytes: &[u8] = match num_mel_bins {
+        80 => include_bytes!("melfilters.bytes"),
+        128 => include_bytes!("melfilters128.bytes"),
+        n => anyhow::bail!("Unsupported num_mel_bins={n}; expected 80 or 128"),
+    };
+    let mut mel_filters = vec![0f32; mel_bytes.len() / 4];
+    LittleEndian::read_f32_into(mel_bytes, &mut mel_filters);
+    Ok(mel_filters)
+}
+
 impl Transcriber for WhisperNativeTranscriber {
     fn transcribe(&self, wav_path: &Path) -> anyhow::Result<String> {
         // ── Load & normalise audio ──────────────────────────────────────
@@ -151,15 +166,15 @@ impl Transcriber for WhisperNativeTranscriber {
             reader.into_samples::<f32>().collect::<Result<_, _>>()?
         };
 
-        // Pad or truncate to exactly 30 s (what the model expects).
-        let mut audio = vec![0.0f32; CHUNK_SAMPLES];
-        let len = raw.len().min(CHUNK_SAMPLES);
-        audio[..len].copy_from_slice(&raw[..len]);
-
-        // ── Mel spectrogram ─────────────────────────────────────────────
-        let mel = log_mel_spectrogram(&audio, &self.mel_filters, self.n_mels);
-        let n_frames = CHUNK_SAMPLES / HOP_LENGTH;
-        let mel_tensor = Tensor::from_vec(mel, &[1, self.n_mels, n_frames], &self.device)?;
+        // ── Mel spectrogram (candle reference implementation) ─────────
+        let mel = m::audio::pcm_to_mel(&self.config, &raw, &self.mel_filters);
+        let mel_len = mel.len();
+        let n_mel = self.config.num_mel_bins;
+        let mel_tensor = Tensor::from_vec(
+            mel,
+            (1, n_mel, mel_len / n_mel),
+            &self.device,
+        )?;
 
         // ── Encode ──────────────────────────────────────────────────────
         let mut model = self
@@ -221,151 +236,4 @@ impl Transcriber for WhisperNativeTranscriber {
     fn is_available(&self) -> bool {
         true
     }
-}
-
-// ── Audio processing (matches OpenAI whisper preprocessing) ─────────────────
-
-/// Compute a log-mel spectrogram identical to OpenAI's whisper `log_mel_spectrogram`.
-fn log_mel_spectrogram(samples: &[f32], mel_filters: &[f32], n_mels: usize) -> Vec<f32> {
-    let fft_size = N_FFT.next_power_of_two(); // 400 → 512
-    let n_freqs = N_FFT / 2 + 1; // 201
-    let n_frames = samples.len() / HOP_LENGTH; // 3000 for 30 s
-
-    // Periodic Hann window (PyTorch convention).
-    let window: Vec<f32> = (0..N_FFT)
-        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / N_FFT as f32).cos()))
-        .collect();
-
-    let mut mel = vec![0.0f32; n_mels * n_frames];
-
-    for frame_idx in 0..n_frames {
-        let start = frame_idx * HOP_LENGTH;
-
-        // Window the frame and zero-pad to fft_size.
-        let mut buf = vec![(0.0f32, 0.0f32); fft_size];
-        for i in 0..N_FFT {
-            let s = if start + i < samples.len() {
-                samples[start + i]
-            } else {
-                0.0
-            };
-            buf[i] = (s * window[i], 0.0);
-        }
-
-        fft(&mut buf);
-
-        // Power spectrum (magnitude²) of first n_freqs bins.
-        // Apply mel filters and write to output.
-        for mel_idx in 0..n_mels {
-            let mut sum = 0.0f32;
-            let filter_row = mel_idx * n_freqs;
-            for freq_idx in 0..n_freqs {
-                let (re, im) = buf[freq_idx];
-                let power = re * re + im * im;
-                sum += mel_filters[filter_row + freq_idx] * power;
-            }
-            mel[mel_idx * n_frames + frame_idx] = sum.max(1e-10).log10();
-        }
-    }
-
-    // Clamp & normalise (whisper convention).
-    let max_val = mel.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    for v in &mut mel {
-        *v = ((*v).max(max_val - 8.0) + 4.0) / 4.0;
-    }
-
-    mel
-}
-
-/// In-place radix-2 Cooley–Tukey FFT. `buf.len()` must be a power of two.
-fn fft(buf: &mut [(f32, f32)]) {
-    let n = buf.len();
-    debug_assert!(n.is_power_of_two());
-
-    // Bit-reversal permutation.
-    let mut j: usize = 0;
-    for i in 1..n {
-        let mut bit = n >> 1;
-        while j & bit != 0 {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j ^= bit;
-        if i < j {
-            buf.swap(i, j);
-        }
-    }
-
-    // Butterfly passes.
-    let mut len = 2;
-    while len <= n {
-        let half = len / 2;
-        let angle_step = -2.0 * std::f32::consts::PI / len as f32;
-        for start in (0..n).step_by(len) {
-            for k in 0..half {
-                let angle = angle_step * k as f32;
-                let (cos_a, sin_a) = (angle.cos(), angle.sin());
-                let (re, im) = buf[start + k + half];
-                let t_re = cos_a * re - sin_a * im;
-                let t_im = cos_a * im + sin_a * re;
-                let (u_re, u_im) = buf[start + k];
-                buf[start + k] = (u_re + t_re, u_im + t_im);
-                buf[start + k + half] = (u_re - t_re, u_im - t_im);
-            }
-        }
-        len <<= 1;
-    }
-}
-
-/// Compute an HTK mel filter bank matching `librosa.filters.mel` with Slaney normalisation.
-fn compute_mel_filters(n_mels: usize, n_fft: usize, sample_rate: u32) -> Vec<f32> {
-    let n_freqs = n_fft / 2 + 1;
-    let fmax = sample_rate as f64 / 2.0;
-
-    let hz_to_mel = |hz: f64| 2595.0 * (1.0 + hz / 700.0).log10();
-    let mel_to_hz = |mel: f64| 700.0 * (10.0_f64.powf(mel / 2595.0) - 1.0);
-
-    let mel_low = hz_to_mel(0.0);
-    let mel_high = hz_to_mel(fmax);
-
-    // n_mels + 2 points equally spaced in mel space.
-    let mel_points: Vec<f64> = (0..n_mels + 2)
-        .map(|i| mel_low + (mel_high - mel_low) * i as f64 / (n_mels + 1) as f64)
-        .collect();
-
-    let hz_points: Vec<f64> = mel_points.iter().map(|&m| mel_to_hz(m)).collect();
-
-    // Continuous FFT-bin indices.
-    let bin_points: Vec<f64> = hz_points
-        .iter()
-        .map(|&hz| hz * n_fft as f64 / sample_rate as f64)
-        .collect();
-
-    let mut filters = vec![0.0f32; n_mels * n_freqs];
-
-    for i in 0..n_mels {
-        let f_left = bin_points[i];
-        let f_center = bin_points[i + 1];
-        let f_right = bin_points[i + 2];
-
-        for j in 0..n_freqs {
-            let freq = j as f64;
-            let val = if freq >= f_left && freq < f_center {
-                (freq - f_left) / (f_center - f_left)
-            } else if freq >= f_center && freq <= f_right {
-                (f_right - freq) / (f_right - f_center)
-            } else {
-                0.0
-            };
-            filters[i * n_freqs + j] = val as f32;
-        }
-
-        // Slaney normalisation: scale by 2 / bandwidth_hz.
-        let enorm = 2.0 / (hz_points[i + 2] - hz_points[i]) as f32;
-        for j in 0..n_freqs {
-            filters[i * n_freqs + j] *= enorm;
-        }
-    }
-
-    filters
 }

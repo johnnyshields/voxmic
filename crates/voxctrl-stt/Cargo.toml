@@ -9,7 +9,7 @@ default = ["stt-voxtral-native", "stt-whisper-native"]
 
 # STT backends
 stt-whisper-cpp     = ["dep:whisper-rs"]
-stt-whisper-native  = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf-hub", "dep:tokenizers"]
+stt-whisper-native  = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf-hub", "dep:tokenizers", "dep:byteorder"]
 stt-voxtral-native  = ["dep:voxtral-mini-realtime", "dep:burn"]
 
 # GPU acceleration (opt-in, cross-cutting)
@@ -32,6 +32,7 @@ candle-nn           = { version = "0.8", optional = true }
 candle-transformers = { version = "0.8", optional = true }
 hf-hub              = { version = "0.3", optional = true }
 tokenizers          = { version = "0.20", optional = true }
+byteorder           = { version = "1", optional = true }
 
 # STT: voxtral-native (optional) — pure Rust Voxtral via Burn ML framework
 voxtral-mini-realtime = { git = "https://github.com/TrevorS/voxtral-mini-realtime-rs", default-features = false, features = ["hub", "native-tokenizer", "wgpu"], optional = true }
