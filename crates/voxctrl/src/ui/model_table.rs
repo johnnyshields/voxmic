@@ -2117,6 +2117,162 @@ fn hf_token() -> Option<String> {
     std::fs::read_to_string(token_path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// Download a single file from HuggingFace Hub with retries and HTTP Range resume.
+///
+/// Downloads to `partial` first, then atomically renames to `dest` on success.
+/// Calls `on_progress(delta)` after each chunk; negative delta means stale partial
+/// bytes were discarded (server returned 200 instead of 206).
+fn download_single_file(
+    filename: &str,
+    url: &str,
+    dest: &std::path::Path,
+    partial: &std::path::Path,
+    token: &Option<String>,
+    file_index: usize,
+    total_files: usize,
+    mut on_progress: impl FnMut(i64),
+) -> anyhow::Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    const MAX_RETRIES: u32 = 3;
+    const RETRY_DELAYS_SECS: &[u64] = &[2, 5];
+
+    let retry_delay = |attempt: u32, msg: &str| {
+        if attempt < MAX_RETRIES {
+            let delay = RETRY_DELAYS_SECS.get((attempt - 1) as usize).copied().unwrap_or(5);
+            log::warn!("{msg}, retrying in {delay}s…");
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+        }
+    };
+
+    // Create parent dirs for nested files (e.g. "subdir/file.bin")
+    if let Some(parent) = partial.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for attempt in 1..=MAX_RETRIES {
+        log::info!(
+            "Downloading {} ({}/{}, attempt {}/{})",
+            url, file_index + 1, total_files, attempt, MAX_RETRIES
+        );
+
+        let existing = partial.metadata().map(|m| m.len()).unwrap_or(0);
+
+        let mut req = ureq::get(url);
+        if let Some(ref tok) = token {
+            req = req.set("Authorization", &format!("Bearer {tok}"));
+        }
+        if existing > 0 {
+            req = req.set("Range", &format!("bytes={existing}-"));
+        }
+
+        let resp = match req.call() {
+            Ok(r) => r,
+            Err(e) => {
+                let hint = if token.is_none() {
+                    " (no HF token found — set HF_TOKEN env var or run `huggingface-cli login`)"
+                } else {
+                    ""
+                };
+                last_err = Some(anyhow::anyhow!("HTTP request failed for {filename}: {e}{hint}"));
+                retry_delay(attempt, &format!("Attempt {attempt} failed"));
+                continue;
+            }
+        };
+
+        // Check content type — HF returns text/html for auth errors / gated models
+        let content_type = resp.header("content-type").unwrap_or("");
+        if content_type.contains("text/html") {
+            anyhow::bail!(
+                "HuggingFace returned HTML instead of model file for {filename}. \
+                 This usually means the model is gated or requires authentication. \
+                 Set your HF token in Settings → Models tab."
+            );
+        }
+
+        let status = resp.status();
+        let content_length: Option<u64> = resp
+            .header("content-length")
+            .and_then(|v| v.parse().ok());
+
+        let expected_total: Option<u64>;
+        let mut out;
+
+        if status == 206 {
+            // Server supports Range — append to existing partial file
+            expected_total = content_length.map(|cl| existing + cl);
+            out = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(partial)?;
+            out.seek(SeekFrom::End(0))?;
+        } else {
+            // 200 — full response; discard any stale partial data
+            expected_total = content_length;
+            out = std::fs::File::create(partial)?;
+            // Notify caller to reset progress accounting for stale partial bytes.
+            on_progress(-(existing as i64));
+        }
+
+        let mut reader = resp.into_reader();
+        let mut buf = [0u8; 65536]; // 64 KB read chunks
+        let read_result: std::io::Result<()> = loop {
+            let n = match reader.read(&mut buf) {
+                Ok(0) => break Ok(()),
+                Ok(n) => n,
+                Err(e) => break Err(e),
+            };
+            out.write_all(&buf[..n])?;
+            on_progress(n as i64);
+        };
+        out.flush()?;
+        drop(out);
+
+        // Handle read errors — keep partial file for resume
+        if let Err(e) = read_result {
+            last_err = Some(anyhow::anyhow!("Read error downloading {filename}: {e}"));
+            retry_delay(attempt, &format!("Read error on attempt {attempt}"));
+            continue;
+        }
+
+        // Content-Length validation: detect premature EOF
+        let actual_total = partial.metadata()?.len();
+        if let Some(expected) = expected_total {
+            if actual_total != expected {
+                last_err = Some(anyhow::anyhow!(
+                    "Incomplete download for {filename}: got {actual_total} bytes, expected {expected}"
+                ));
+                retry_delay(attempt, &format!("Incomplete: {actual_total}/{expected} bytes"));
+                continue;
+            }
+        }
+
+        // Validate: model files should be at least 1 KB (HTML error pages are small)
+        if actual_total < 1024
+            && (filename.ends_with(".safetensors") || filename.ends_with(".onnx"))
+        {
+            let _ = std::fs::remove_file(partial);
+            anyhow::bail!(
+                "Downloaded {filename} is only {actual_total} bytes — likely an error page, not model data. \
+                 Check your HF token and network connection."
+            );
+        }
+
+        // Success — atomically move partial file to final destination
+        std::fs::rename(partial, dest)?;
+        log::info!("Downloaded {filename}: {actual_total} bytes");
+        return Ok(());
+    }
+
+    // Exhausted all retries
+    anyhow::bail!(
+        "Download failed after {MAX_RETRIES} attempts for {filename}: {}",
+        last_err.unwrap()
+    );
+}
+
 /// Download all files for a model from HuggingFace Hub.
 ///
 /// Downloads to `.partial` files and renames on success, so incomplete downloads
@@ -2127,10 +2283,6 @@ fn download_model_files(
     repo: &str,
     registry: &Arc<Mutex<ModelRegistry>>,
 ) -> anyhow::Result<()> {
-    use std::io::{Read, Seek, SeekFrom, Write};
-
-    const MAX_RETRIES: u32 = 3;
-    const RETRY_DELAYS_SECS: &[u64] = &[2, 5];
     const UPDATE_INTERVAL: u64 = 256 * 1024; // update UI every 256 KB
 
     let token = hf_token();
@@ -2163,13 +2315,9 @@ fn download_model_files(
 
         // Skip files already fully downloaded (e.g. resumed session).
         if dest.exists() {
+            total_downloaded += dest.metadata().map(|m| m.len()).unwrap_or(0);
             log::info!("Skipping {filename}: already present");
             continue;
-        }
-
-        // Create parent dirs for nested files (e.g. "subdir/file.bin")
-        if let Some(parent) = partial.parent() {
-            std::fs::create_dir_all(parent)?;
         }
 
         let url = format!(
@@ -2177,153 +2325,25 @@ fn download_model_files(
             repo, filename
         );
 
-        let mut last_err: Option<anyhow::Error> = None;
-
-        for attempt in 1..=MAX_RETRIES {
-            log::info!(
-                "Downloading {} ({}/{}, attempt {}/{})",
-                url, i + 1, files.len(), attempt, MAX_RETRIES
-            );
-
-            let existing = partial.metadata().map(|m| m.len()).unwrap_or(0);
-
-            let mut req = ureq::get(&url);
-            if let Some(ref tok) = token {
-                req = req.set("Authorization", &format!("Bearer {tok}"));
-            }
-            if existing > 0 {
-                req = req.set("Range", &format!("bytes={existing}-"));
-            }
-
-            let resp = match req.call() {
-                Ok(r) => r,
-                Err(e) => {
-                    let hint = if token.is_none() {
-                        " (no HF token found — set HF_TOKEN env var or run `huggingface-cli login`)"
-                    } else {
-                        ""
-                    };
-                    last_err = Some(anyhow::anyhow!("HTTP request failed for {filename}: {e}{hint}"));
-                    if attempt < MAX_RETRIES {
-                        let delay = RETRY_DELAYS_SECS.get((attempt - 1) as usize).copied().unwrap_or(5);
-                        log::warn!("Attempt {attempt} failed, retrying in {delay}s…");
-                        std::thread::sleep(std::time::Duration::from_secs(delay));
-                    }
-                    continue;
-                }
-            };
-
-            // Check content type — HF returns text/html for auth errors / gated models
-            let content_type = resp.header("content-type").unwrap_or("");
-            if content_type.contains("text/html") {
-                anyhow::bail!(
-                    "HuggingFace returned HTML instead of model file for {filename}. \
-                     This usually means the model is gated or requires authentication. \
-                     Set your HF token in Settings → Models tab."
-                );
-            }
-
-            let status = resp.status();
-            let content_length: Option<u64> = resp
-                .header("content-length")
-                .and_then(|v| v.parse().ok());
-
-            let expected_total: Option<u64>;
-            let mut out;
-
-            if status == 206 {
-                // Server supports Range — append to existing partial file
-                expected_total = content_length.map(|cl| existing + cl);
-                out = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .open(&partial)?;
-                out.seek(SeekFrom::End(0))?;
+        download_single_file(filename, &url, &dest, &partial, &token, i, files.len(), |delta| {
+            if delta >= 0 {
+                total_downloaded += delta as u64;
             } else {
-                // 200 — full response; discard any stale partial data
-                expected_total = content_length;
-                out = std::fs::File::create(&partial)?;
-                // Reset progress accounting: remove the stale partial bytes.
-                total_downloaded = total_downloaded.saturating_sub(existing);
+                total_downloaded = total_downloaded.saturating_sub((-delta) as u64);
             }
 
-            let mut reader = resp.into_reader();
-            let mut buf = [0u8; 65536]; // 64 KB read chunks
-            let read_result: std::io::Result<()> = loop {
-                let n = match reader.read(&mut buf) {
-                    Ok(0) => break Ok(()),
-                    Ok(n) => n,
-                    Err(e) => break Err(e),
+            if total_downloaded - last_update_bytes >= UPDATE_INTERVAL {
+                last_update_bytes = total_downloaded;
+                let pct = if total_expected > 0 {
+                    (total_downloaded as f64 / total_expected as f64 * 100.0).min(99.0) as u8
+                } else {
+                    ((i as f64 / files.len() as f64) * 100.0) as u8
                 };
-                out.write_all(&buf[..n])?;
-                total_downloaded += n as u64;
-
-                if total_downloaded - last_update_bytes >= UPDATE_INTERVAL {
-                    last_update_bytes = total_downloaded;
-                    let pct = if total_expected > 0 {
-                        (total_downloaded as f64 / total_expected as f64 * 100.0).min(99.0) as u8
-                    } else {
-                        ((i as f64 / files.len() as f64) * 100.0) as u8
-                    };
-                    if let Some(entry) = registry.lock().unwrap().get_mut(&info.id) {
-                        entry.status = DownloadStatus::Downloading { progress_pct: pct };
-                    }
-                }
-            };
-            out.flush()?;
-            drop(out);
-
-            // Handle read errors — keep partial file for resume
-            if let Err(e) = read_result {
-                last_err = Some(anyhow::anyhow!("Read error downloading {filename}: {e}"));
-                if attempt < MAX_RETRIES {
-                    let delay = RETRY_DELAYS_SECS.get((attempt - 1) as usize).copied().unwrap_or(5);
-                    log::warn!("Read error on attempt {attempt}, retrying in {delay}s…");
-                    std::thread::sleep(std::time::Duration::from_secs(delay));
-                }
-                continue;
-            }
-
-            // Content-Length validation: detect premature EOF
-            let actual_total = partial.metadata()?.len();
-            if let Some(expected) = expected_total {
-                if actual_total != expected {
-                    last_err = Some(anyhow::anyhow!(
-                        "Incomplete download for {filename}: got {actual_total} bytes, expected {expected}"
-                    ));
-                    if attempt < MAX_RETRIES {
-                        let delay = RETRY_DELAYS_SECS.get((attempt - 1) as usize).copied().unwrap_or(5);
-                        log::warn!(
-                            "Incomplete: {actual_total}/{expected} bytes, retrying in {delay}s…"
-                        );
-                        std::thread::sleep(std::time::Duration::from_secs(delay));
-                    }
-                    continue;
+                if let Some(entry) = registry.lock().unwrap().get_mut(&info.id) {
+                    entry.status = DownloadStatus::Downloading { progress_pct: pct };
                 }
             }
-
-            // Validate: model files should be at least 1 KB (HTML error pages are small)
-            if actual_total < 1024
-                && (filename.ends_with(".safetensors") || filename.ends_with(".onnx"))
-            {
-                let _ = std::fs::remove_file(&partial);
-                anyhow::bail!(
-                    "Downloaded {filename} is only {actual_total} bytes — likely an error page, not model data. \
-                     Check your HF token and network connection."
-                );
-            }
-
-            // Success — atomically move partial file to final destination
-            std::fs::rename(&partial, &dest)?;
-            log::info!("Downloaded {filename}: {actual_total} bytes");
-            last_err = None;
-            break;
-        }
-
-        // If we exhausted all retries without success, bail
-        if let Some(e) = last_err {
-            anyhow::bail!("Download failed after {MAX_RETRIES} attempts for {filename}: {e}");
-        }
+        })?;
     }
 
     Ok(())

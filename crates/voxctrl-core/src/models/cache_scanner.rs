@@ -416,6 +416,42 @@ mod tests {
         }
     }
 
+    // ── .partial file tests ────────────────────────────────────────────
+
+    #[test]
+    fn partial_file_does_not_satisfy_has_all_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Only a .partial file exists — the real file is missing
+        fs::write(tmp.path().join("model.safetensors.partial"), b"incomplete").unwrap();
+
+        assert!(!has_all_files(tmp.path(), &["model.safetensors".into()]));
+    }
+
+    #[test]
+    fn partial_file_does_not_count_as_downloaded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snap = tmp.path()
+            .join("models--test--partial-trap")
+            .join("snapshots")
+            .join("main");
+        fs::create_dir_all(&snap).unwrap();
+        // Write only a .partial file — the real required file is absent
+        fs::write(snap.join("model.safetensors.partial"), b"incomplete-data").unwrap();
+
+        let mut entries = vec![make_entry(
+            "test/partial-trap",
+            "test/partial-trap",
+            &["model.safetensors"],
+        )];
+        let dirs = vec![tmp.path().to_path_buf()];
+        scan_hf_cache_in_dirs(&mut entries, &dirs);
+
+        assert!(
+            matches!(entries[0].status, DownloadStatus::NotDownloaded),
+            "A .partial file must not trick the cache scanner into marking a model as Downloaded"
+        );
+    }
+
     #[test]
     fn apply_model_paths_skips_nonexistent() {
         let mut entries = vec![make_entry("my-model", "org/repo", &[])];
