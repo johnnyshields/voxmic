@@ -11,12 +11,12 @@ use anyhow::{Context, Result};
 use interprocess::local_socket::{ListenerOptions, ToNsName};
 use interprocess::local_socket::traits::ListenerExt;
 
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, SharedPipeline};
 
 const MAX_PAYLOAD: u32 = 100_000_000; // 100 MB
 
 /// Start the STT named-pipe server on a background thread.
-pub fn start(pipeline: Arc<Pipeline>) -> Result<()> {
+pub fn start(pipeline: Arc<SharedPipeline>) -> Result<()> {
     let name = crate::PIPE_NAME.to_ns_name::<interprocess::local_socket::GenericNamespaced>()
         .context("Failed to create namespaced pipe name")?;
 
@@ -33,9 +33,10 @@ pub fn start(pipeline: Arc<Pipeline>) -> Result<()> {
             for stream in listener.incoming() {
                 match stream {
                     Ok(stream) => {
-                        let pipeline = pipeline.clone();
+                        // Snapshot the current pipeline per connection
+                        let snap = pipeline.get();
                         std::thread::spawn(move || {
-                            if let Err(e) = handle_connection(stream, &pipeline) {
+                            if let Err(e) = handle_connection(stream, &snap) {
                                 log::warn!("STT server connection error: {e}");
                             }
                         });

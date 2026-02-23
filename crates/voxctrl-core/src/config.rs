@@ -40,7 +40,7 @@ impl fmt::Display for GpuBackend {
 
 // ── Sub-configs for each pipeline stage ────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SttConfig {
     #[serde(default = "default_stt_backend")]
     pub backend: String,
@@ -69,7 +69,7 @@ impl Default for SttConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VadConfig {
     #[serde(default = "default_vad_backend")]
     pub backend: String,
@@ -89,7 +89,7 @@ impl Default for VadConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouterConfig {
     #[serde(default = "default_router_backend")]
     pub backend: String,
@@ -107,7 +107,7 @@ impl Default for RouterConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionConfig {
     #[serde(default = "default_action_backend")]
     pub backend: String,
@@ -145,7 +145,7 @@ impl Default for ActionConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HotkeyConfig {
     #[serde(default = "default_hotkey_shortcut")]
     pub dict_shortcut: String,
@@ -163,7 +163,7 @@ impl Default for HotkeyConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioConfig {
     #[serde(default = "default_device_pattern")]
     pub device_pattern: String,
@@ -183,7 +183,7 @@ impl Default for AudioConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ModelsConfig {
     #[serde(default)]
     pub models_directory: Option<PathBuf>,
@@ -191,7 +191,7 @@ pub struct ModelsConfig {
     pub model_paths: HashMap<String, PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GpuConfig {
     /// GPU backend selection.
     #[serde(default)]
@@ -220,7 +220,7 @@ impl Default for GpuConfig {
 
 // ── Top-level config ───────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub stt: SttConfig,
@@ -276,11 +276,18 @@ fn default_zluda_auto_download() -> bool { true }
 
 // ── Load / save ────────────────────────────────────────────────────────────
 
-fn config_path() -> PathBuf {
+pub fn config_path() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("config.json")))
         .unwrap_or_else(|| PathBuf::from("config.json"))
+}
+
+/// Return the mtime of config.json, or `None` if the file doesn't exist.
+pub fn config_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(config_path())
+        .ok()
+        .and_then(|m| m.modified().ok())
 }
 
 /// Load config from config.json next to the binary.

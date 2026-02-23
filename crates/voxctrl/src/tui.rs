@@ -11,13 +11,13 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use voxctrl_core::config::Config;
-use voxctrl_core::pipeline::Pipeline;
+use voxctrl_core::pipeline::SharedPipeline;
 use voxctrl_core::{AppStatus, SharedState};
 
 pub fn run_tui(
     state: Arc<SharedState>,
     cfg: Config,
-    pipeline: Arc<Pipeline>,
+    pipeline: Arc<SharedPipeline>,
     _audio_stream: cpal::Stream,
 ) -> Result<()> {
     // Setup terminal
@@ -82,7 +82,7 @@ pub fn run_tui(
                     (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break,
                     (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => break,
                     (KeyCode::Char(' '), _) => {
-                        voxctrl_core::recording::toggle_recording(&state, &cfg, pipeline.clone());
+                        voxctrl_core::recording::toggle_recording(&state, &cfg, &pipeline);
                     }
                     (_, _) => {}
                 }

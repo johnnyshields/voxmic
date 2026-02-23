@@ -1,11 +1,38 @@
 //! Pipeline — wires together STT → Router → Action.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::action::{ActionExecutor, ActionFactory};
 use crate::config::Config;
 use crate::router::{Intent, IntentRouter};
 use crate::stt::{SttFactory, Transcriber};
+
+// ── SharedPipeline ──────────────────────────────────────────────────────────
+
+/// Thread-safe wrapper allowing atomic pipeline replacement.
+///
+/// In-flight operations keep the old pipeline alive via `Arc`; new requests
+/// pick up the replacement after `swap()`.
+pub struct SharedPipeline {
+    inner: Mutex<Arc<Pipeline>>,
+}
+
+impl SharedPipeline {
+    pub fn new(p: Pipeline) -> Self {
+        Self { inner: Mutex::new(Arc::new(p)) }
+    }
+
+    /// Cheap `Arc` clone — callers snapshot the current pipeline.
+    pub fn get(&self) -> Arc<Pipeline> {
+        self.inner.lock().unwrap().clone()
+    }
+
+    /// Atomically replace the pipeline. Existing `Arc` holders are unaffected.
+    pub fn swap(&self, new: Pipeline) {
+        *self.inner.lock().unwrap() = Arc::new(new);
+    }
+}
 
 pub struct Pipeline {
     pub stt: Box<dyn Transcriber>,
@@ -89,7 +116,7 @@ impl Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use crate::action::ActionExecutor;
     use crate::router::{Intent, IntentRouter};
@@ -224,5 +251,57 @@ mod tests {
         let result = pipeline.process_pcm(&[0.1], 16000);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("stt failed"));
+    }
+
+    // ── SharedPipeline tests ──────────────────────────────────────────
+
+    fn make_shared(response: &str) -> SharedPipeline {
+        SharedPipeline::new(Pipeline {
+            stt: Box::new(MockTranscriber { response: response.into() }),
+            router: Box::new(MockRouter { routed: Arc::new(Mutex::new(vec![])) }),
+            action: Box::new(MockAction { executed: Arc::new(Mutex::new(vec![])) }),
+        })
+    }
+
+    #[test]
+    fn shared_pipeline_get_returns_current() {
+        let sp = make_shared("hello");
+        let p = sp.get();
+        assert_eq!(p.stt.name(), "mock");
+    }
+
+    #[test]
+    fn shared_pipeline_swap_replaces_pipeline() {
+        let sp = make_shared("v1");
+        let old = sp.get();
+
+        sp.swap(Pipeline {
+            stt: Box::new(MockTranscriber { response: "v2".into() }),
+            router: Box::new(MockRouter { routed: Arc::new(Mutex::new(vec![])) }),
+            action: Box::new(MockAction { executed: Arc::new(Mutex::new(vec![])) }),
+        });
+
+        let new = sp.get();
+        // Old holder still works
+        assert_eq!(old.stt.transcribe_pcm(&[], 0).unwrap(), "v1");
+        // New holder gets the replacement
+        assert_eq!(new.stt.transcribe_pcm(&[], 0).unwrap(), "v2");
+    }
+
+    #[test]
+    fn shared_pipeline_inflight_survives_swap() {
+        let sp = Arc::new(make_shared("original"));
+        let snapshot = sp.get();
+
+        sp.swap(Pipeline {
+            stt: Box::new(MockTranscriber { response: "replaced".into() }),
+            router: Box::new(MockRouter { routed: Arc::new(Mutex::new(vec![])) }),
+            action: Box::new(MockAction { executed: Arc::new(Mutex::new(vec![])) }),
+        });
+
+        // snapshot still works with original pipeline
+        assert_eq!(snapshot.stt.transcribe_pcm(&[], 0).unwrap(), "original");
+        // new get() returns the replacement
+        assert_eq!(sp.get().stt.transcribe_pcm(&[], 0).unwrap(), "replaced");
     }
 }

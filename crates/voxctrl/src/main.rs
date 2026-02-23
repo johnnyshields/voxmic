@@ -15,6 +15,7 @@ mod tui;
 mod ui;
 
 use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime};
 
 use anyhow::Result;
 
@@ -71,9 +72,10 @@ fn pick_ui_mode() -> UiMode {
 fn run_gui(
     state: Arc<SharedState>,
     cfg: config::Config,
-    pipeline: Arc<pipeline::Pipeline>,
+    pipeline: Arc<pipeline::SharedPipeline>,
     audio_stream: cpal::Stream,
     registry: Arc<Mutex<models::ModelRegistry>>,
+    action_factory: Option<Box<voxctrl_core::action::ActionFactory>>,
 ) -> Result<()> {
     use global_hotkey::GlobalHotKeyEvent;
     use muda::MenuEvent;
@@ -90,12 +92,106 @@ fn run_gui(
         hotkey_manager: Option<global_hotkey::GlobalHotKeyManager>,
         hotkey_ids: hotkey::HotkeyIds,
         cfg: config::Config,
-        pipeline: Arc<pipeline::Pipeline>,
+        pipeline: Arc<pipeline::SharedPipeline>,
         _audio_stream: Option<cpal::Stream>,
         #[allow(dead_code)]
         registry: Arc<Mutex<models::ModelRegistry>>,
         menu_ids: tray::TrayMenuIds,
         settings_child: Option<std::process::Child>,
+        // Config hot-reload state
+        config_mtime: Option<SystemTime>,
+        last_config_check: Instant,
+        action_factory: Option<Box<voxctrl_core::action::ActionFactory>>,
+    }
+
+    impl App {
+        /// Diff old vs new config and apply changes without restart.
+        fn apply_config_changes(&mut self, new_cfg: config::Config) {
+            let old = &self.cfg;
+
+            // Audio section changed → recreate audio stream
+            if new_cfg.audio != old.audio {
+                log::info!("Audio config changed — recreating stream");
+                // Drop old stream first
+                self._audio_stream = None;
+                match audio::start_capture(self.state.clone(), &new_cfg) {
+                    Ok(stream) => {
+                        self._audio_stream = Some(stream);
+                        log::info!("Audio stream recreated");
+                    }
+                    Err(e) => log::error!("Failed to recreate audio stream: {e}"),
+                }
+            }
+
+            // Pipeline-affecting sections changed → rebuild pipeline
+            if new_cfg.stt != old.stt
+                || new_cfg.vad != old.vad
+                || new_cfg.router != old.router
+                || new_cfg.action != old.action
+                || new_cfg.gpu != old.gpu
+            {
+                self.rebuild_pipeline(&new_cfg);
+            }
+
+            // Hotkeys changed AND settings not open → reapply
+            if new_cfg.hotkey != old.hotkey && self.settings_child.is_none() {
+                self.reapply_hotkeys(&new_cfg.hotkey);
+            }
+
+            self.cfg = new_cfg;
+        }
+
+        /// Build a new pipeline from config and swap it in.
+        fn rebuild_pipeline(&self, cfg: &config::Config) {
+            let gpus = voxctrl_core::gpu::detect_gpus();
+            let gpu_mode = voxctrl_core::gpu::resolve_gpu_mode(&cfg.gpu, &gpus);
+            let whisper_device = voxctrl_core::gpu::gpu_mode_to_whisper_device(gpu_mode);
+
+            let mut build_cfg = cfg.clone();
+            if build_cfg.stt.whisper_device != whisper_device {
+                build_cfg.stt.whisper_device = whisper_device.into();
+            }
+
+            // Re-scan registry to pick up any new model downloads
+            let stt_model_dir = {
+                let mut reg = self.registry.lock().unwrap();
+                reg.scan_cache(&build_cfg.models);
+                models::catalog::required_model_id(&build_cfg)
+                    .and_then(|id| reg.model_path(&id))
+            };
+
+            match pipeline::Pipeline::from_config(
+                &build_cfg,
+                stt_model_dir,
+                Some(&voxctrl_stt::stt_factory),
+                self.action_factory.as_deref(),
+            ) {
+                Ok(new_pipeline) => {
+                    self.pipeline.swap(new_pipeline);
+                    log::info!("Pipeline rebuilt and swapped");
+                }
+                Err(e) => log::error!("Failed to rebuild pipeline: {e}"),
+            }
+        }
+
+        /// Unregister old hotkeys, set up new ones from config.
+        fn reapply_hotkeys(&mut self, hotkey_cfg: &config::HotkeyConfig) {
+            if let Some(ref mgr) = self.hotkey_manager {
+                hotkey::unregister_hotkeys(mgr, &self.hotkey_ids);
+            }
+            match hotkey::setup_hotkeys(hotkey_cfg) {
+                Ok(Some((mgr, ids))) => {
+                    log::info!("Hotkeys reapplied from new config");
+                    self.hotkey_manager = Some(mgr);
+                    self.hotkey_ids = ids;
+                }
+                Ok(None) => {
+                    self.hotkey_manager = None;
+                    self.hotkey_ids = hotkey::HotkeyIds::none();
+                }
+                Err(e) => log::error!("Failed to reapply hotkeys: {e}"),
+            }
+        }
     }
 
     impl ApplicationHandler for App {
@@ -132,7 +228,7 @@ fn run_gui(
                 }
             }
 
-            // Check if Settings subprocess has exited → re-register hotkeys
+            // Check if Settings subprocess has exited → reload config, reapply hotkeys
             let settings_exited = match self.settings_child {
                 Some(ref mut child) => match child.try_wait() {
                     Ok(Some(status)) => {
@@ -149,8 +245,23 @@ fn run_gui(
             };
             if settings_exited {
                 self.settings_child = None;
-                if let Some(ref mgr) = self.hotkey_manager {
-                    hotkey::reregister_hotkeys(mgr, &self.hotkey_ids);
+                // Reload config from disk and apply any changes made by settings
+                let new_cfg = config::load_config();
+                self.config_mtime = config::config_mtime();
+                self.apply_config_changes(new_cfg);
+            }
+
+            // Poll config.json mtime every 500ms for hot-reload
+            if self.last_config_check.elapsed() >= std::time::Duration::from_millis(500) {
+                self.last_config_check = Instant::now();
+                let current_mtime = config::config_mtime();
+                if current_mtime != self.config_mtime {
+                    self.config_mtime = current_mtime;
+                    let new_cfg = config::load_config();
+                    if new_cfg != self.cfg {
+                        log::info!("Config file changed — applying updates");
+                        self.apply_config_changes(new_cfg);
+                    }
                 }
             }
 
@@ -160,7 +271,7 @@ fn run_gui(
                     &self.hotkey_ids,
                     &self.state,
                     &self.cfg,
-                    self.pipeline.clone(),
+                    &self.pipeline,
                 );
             }
         }
@@ -179,7 +290,8 @@ fn run_gui(
 
     // Update tray tooltip to reflect pending subsystems
     {
-        let stt_pending = pipeline.stt.name().contains("pending");
+        let snap = pipeline.get();
+        let stt_pending = snap.stt.name().contains("pending");
         let hotkey_pending = hotkey_ids.dictation.is_none();
         if stt_pending || hotkey_pending {
             let mut parts = Vec::new();
@@ -201,6 +313,9 @@ fn run_gui(
         registry,
         menu_ids,
         settings_child: None,
+        config_mtime: config::config_mtime(),
+        last_config_check: Instant::now(),
+        action_factory,
     };
 
     if app.hotkey_ids.dictation.is_none() {
@@ -410,12 +525,14 @@ fn run() -> Result<()> {
     let action_factory = build_action_factory();
 
     log::info!("Creating pipeline...");
-    let pipeline = Arc::new(pipeline::Pipeline::from_config(
-        &cfg,
-        stt_model_dir,
-        Some(&voxctrl_stt::stt_factory),
-        action_factory.as_deref(),
-    )?);
+    let pipeline = Arc::new(pipeline::SharedPipeline::new(
+        pipeline::Pipeline::from_config(
+            &cfg,
+            stt_model_dir,
+            Some(&voxctrl_stt::stt_factory),
+            action_factory.as_deref(),
+        )?,
+    ));
     log::info!("Pipeline created");
 
     log::info!("Starting audio capture...");
@@ -428,7 +545,7 @@ fn run() -> Result<()> {
 
     match ui_mode {
         #[cfg(feature = "gui")]
-        UiMode::Gui => run_gui(state, cfg, pipeline, audio_stream, registry)?,
+        UiMode::Gui => run_gui(state, cfg, pipeline, audio_stream, registry, action_factory)?,
         #[cfg(feature = "tui")]
         UiMode::Tui => tui::run_tui(state, cfg, pipeline, audio_stream)?,
     }

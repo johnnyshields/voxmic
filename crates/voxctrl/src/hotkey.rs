@@ -7,7 +7,7 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 use voxctrl_core::config::{Config, HotkeyConfig};
-use voxctrl_core::pipeline::Pipeline;
+use voxctrl_core::pipeline::SharedPipeline;
 use voxctrl_core::SharedState;
 
 /// Registered global hotkeys (HotKey is Copy; derive IDs via `.id()`).
@@ -209,24 +209,13 @@ pub fn unregister_hotkeys(manager: &GlobalHotKeyManager, ids: &HotkeyIds) {
     }
 }
 
-/// Re-register all hotkeys (e.g. after Settings subprocess exits).
-pub fn reregister_hotkeys(manager: &GlobalHotKeyManager, ids: &HotkeyIds) {
-    let hotkeys: Vec<HotKey> = [ids.dictation, ids.computer_use].into_iter().flatten().collect();
-    if hotkeys.is_empty() { return; }
-    if let Err(e) = manager.register_all(&hotkeys) {
-        log::warn!("Failed to re-register hotkeys: {e}");
-    } else {
-        log::info!("Hotkeys re-registered ({} total)", hotkeys.len());
-    }
-}
-
 /// Handle a hotkey event: toggle Idle → Recording → Transcribing.
 pub fn handle_hotkey_event(
     event: &GlobalHotKeyEvent,
     ids: &HotkeyIds,
     state: &Arc<SharedState>,
     cfg: &Config,
-    pipeline: Arc<Pipeline>,
+    pipeline: &Arc<SharedPipeline>,
 ) {
     if event.state != HotKeyState::Pressed {
         return;
@@ -297,8 +286,9 @@ mod tests {
         (ids, id)
     }
 
-    fn make_test_pipeline() -> Arc<Pipeline> {
+    fn make_test_pipeline() -> Arc<SharedPipeline> {
         use voxctrl_core::action::ActionExecutor;
+        use voxctrl_core::pipeline::Pipeline;
         use voxctrl_core::router::{Intent, IntentRouter};
         use voxctrl_core::stt::Transcriber;
 
@@ -318,11 +308,11 @@ mod tests {
             fn name(&self) -> &str { "noop" }
         }
 
-        Arc::new(Pipeline {
+        Arc::new(SharedPipeline::new(Pipeline {
             stt: Box::new(Noop),
             router: Box::new(Noop),
             action: Box::new(Noop),
-        })
+        }))
     }
 
     #[test]
@@ -333,7 +323,7 @@ mod tests {
         let pipeline = make_test_pipeline();
 
         let event = GlobalHotKeyEvent { id, state: HotKeyState::Pressed };
-        handle_hotkey_event(&event, &ids, &state, &cfg, pipeline);
+        handle_hotkey_event(&event, &ids, &state, &cfg, &pipeline);
 
         assert_eq!(*state.status.lock().unwrap(), AppStatus::Recording);
     }
@@ -346,7 +336,7 @@ mod tests {
         let pipeline = make_test_pipeline();
 
         let event = GlobalHotKeyEvent { id, state: HotKeyState::Released };
-        handle_hotkey_event(&event, &ids, &state, &cfg, pipeline);
+        handle_hotkey_event(&event, &ids, &state, &cfg, &pipeline);
 
         assert_eq!(*state.status.lock().unwrap(), AppStatus::Idle);
     }
@@ -359,7 +349,7 @@ mod tests {
         let pipeline = make_test_pipeline();
 
         let unrelated = GlobalHotKeyEvent { id: 99999, state: HotKeyState::Pressed };
-        handle_hotkey_event(&unrelated, &ids, &state, &cfg, pipeline);
+        handle_hotkey_event(&unrelated, &ids, &state, &cfg, &pipeline);
 
         assert_eq!(*state.status.lock().unwrap(), AppStatus::Idle);
     }

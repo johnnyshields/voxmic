@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::pipeline::Pipeline;
+use crate::pipeline::SharedPipeline;
 use crate::{AppStatus, SharedState};
 
 /// Toggle the recording state: Idle → Recording → Transcribing → (back to Idle).
@@ -16,7 +16,7 @@ use crate::{AppStatus, SharedState};
 pub fn toggle_recording(
     state: &Arc<SharedState>,
     cfg: &Config,
-    pipeline: Arc<Pipeline>,
+    pipeline: &Arc<SharedPipeline>,
 ) {
     let current = *state.status.lock().unwrap();
     match current {
@@ -38,10 +38,12 @@ pub fn toggle_recording(
 
             let state_clone = state.clone();
             let sample_rate = cfg.audio.sample_rate;
+            // Snapshot the current pipeline — in-flight transcription keeps it alive
+            let snap = pipeline.get();
             std::thread::Builder::new()
                 .name("transcription".into())
                 .spawn(move || {
-                    if let Err(e) = pipeline.process_pcm(&chunks, sample_rate) {
+                    if let Err(e) = snap.process_pcm(&chunks, sample_rate) {
                         log::error!("Pipeline error: {e}");
                     }
                     *state_clone.status.lock().unwrap() = AppStatus::Idle;
@@ -91,13 +93,15 @@ mod tests {
         fn name(&self) -> &str { "stub" }
     }
 
-    fn make_pipeline() -> (Arc<Pipeline>, Arc<Mutex<Vec<String>>>) {
+    use crate::pipeline::{Pipeline, SharedPipeline};
+
+    fn make_pipeline() -> (Arc<SharedPipeline>, Arc<Mutex<Vec<String>>>) {
         let executed = Arc::new(Mutex::new(vec![]));
-        let pipeline = Arc::new(Pipeline {
+        let pipeline = Arc::new(SharedPipeline::new(Pipeline {
             stt: Box::new(StubTranscriber),
             router: Box::new(StubRouter),
             action: Box::new(StubAction { executed: executed.clone() }),
-        });
+        }));
         (pipeline, executed)
     }
 
@@ -107,7 +111,7 @@ mod tests {
         let (pipeline, _) = make_pipeline();
         let cfg = Config::default();
 
-        toggle_recording(&state, &cfg, pipeline);
+        toggle_recording(&state, &cfg, &pipeline);
 
         assert_eq!(*state.status.lock().unwrap(), AppStatus::Recording);
         assert!(state.chunks.lock().unwrap().is_empty());
@@ -124,7 +128,7 @@ mod tests {
         state.chunks.lock().unwrap().extend_from_slice(&[0.1, 0.2, 0.3]);
 
         // Recording → Transcribing (spawns thread)
-        toggle_recording(&state, &cfg, pipeline);
+        toggle_recording(&state, &cfg, &pipeline);
 
         // Wait for the transcription thread to finish
         for _ in 0..200 {
@@ -147,7 +151,7 @@ mod tests {
         *state.status.lock().unwrap() = AppStatus::Recording;
         // No chunks pushed — empty audio
 
-        toggle_recording(&state, &cfg, pipeline);
+        toggle_recording(&state, &cfg, &pipeline);
 
         // Should return to Idle synchronously (no thread spawned)
         assert_eq!(*state.status.lock().unwrap(), AppStatus::Idle);
@@ -161,7 +165,7 @@ mod tests {
 
         *state.status.lock().unwrap() = AppStatus::Transcribing;
 
-        toggle_recording(&state, &cfg, pipeline);
+        toggle_recording(&state, &cfg, &pipeline);
 
         assert_eq!(*state.status.lock().unwrap(), AppStatus::Transcribing);
     }
