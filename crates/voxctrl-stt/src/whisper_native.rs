@@ -18,8 +18,9 @@ use voxctrl_core::config::SttConfig;
 
 const MAX_DECODE_TOKENS: usize = 224;
 
-/// Maximum consecutive repetitions of the same token before forcing EOT.
-const MAX_TOKEN_REPEATS: usize = 3;
+/// Maximum consecutive duplicates of the same token before forcing EOT.
+/// A value of 2 means: allow the original + 2 duplicates (3 total), then halt.
+const MAX_CONSECUTIVE_DUPLICATES: usize = 2;
 
 // Fallback token IDs for the standard Whisper tokenizer. Used when
 // `tokenizer.token_to_id()` returns `None` (e.g. a stripped or
@@ -167,8 +168,7 @@ impl WhisperNativeTranscriber {
         );
 
         // Verify model loads correctly before committing to this VarBuilder.
-        let _verify = m::model::Whisper::load(&vb, config.clone())?;
-        drop(_verify);
+        let _ = m::model::Whisper::load(&vb, config.clone())?;
 
         log::info!("WhisperNativeTranscriber: ready ({} suppress tokens)", suppress_tokens.len());
         Ok(Self {
@@ -274,9 +274,9 @@ impl WhisperNativeTranscriber {
             // ── Hallucination guard: repetition detector ─────────────
             if last_token == Some(next_token) {
                 consecutive_repeats += 1;
-                if consecutive_repeats >= MAX_TOKEN_REPEATS {
+                if consecutive_repeats >= MAX_CONSECUTIVE_DUPLICATES {
                     log::warn!(
-                        "[whisper] halting: token {} repeated {} times at step {}",
+                        "[whisper] halting: token {} seen {} times consecutively at step {}",
                         next_token, consecutive_repeats + 1, step
                     );
                     break;
@@ -782,5 +782,124 @@ mod tests {
         // Accented Latin characters should NOT trigger the detector.
         assert!(!contains_non_latin("caf\u{e9}")); // café
         assert!(!contains_non_latin("\u{fc}ber")); // über
+    }
+
+    // ── duration-proportional token limit tests ─────────────────────────
+
+    /// Compute the effective token limit the same way the decode loop does.
+    fn compute_token_limit(duration_secs: f64) -> usize {
+        let duration_token_limit = (duration_secs * 15.0).max(10.0) as usize;
+        MAX_DECODE_TOKENS.min(duration_token_limit)
+    }
+
+    #[test]
+    fn duration_token_limit_short_audio() {
+        // 0.5s: 0.5 * 15 = 7.5, clamped to min 10
+        assert_eq!(compute_token_limit(0.5), 10);
+    }
+
+    #[test]
+    fn duration_token_limit_two_seconds() {
+        // 2s: 2 * 15 = 30
+        assert_eq!(compute_token_limit(2.0), 30);
+    }
+
+    #[test]
+    fn duration_token_limit_fifteen_seconds() {
+        // 15s: 15 * 15 = 225, capped at MAX_DECODE_TOKENS (224)
+        assert_eq!(compute_token_limit(15.0), MAX_DECODE_TOKENS);
+    }
+
+    #[test]
+    fn duration_token_limit_thirty_seconds() {
+        // 30s: 30 * 15 = 450, capped at MAX_DECODE_TOKENS (224)
+        assert_eq!(compute_token_limit(30.0), MAX_DECODE_TOKENS);
+    }
+
+    #[test]
+    fn duration_token_limit_zero() {
+        // 0s: 0 * 15 = 0, clamped to min 10
+        assert_eq!(compute_token_limit(0.0), 10);
+    }
+
+    // ── repetition detector tests ───────────────────────────────────────
+
+    /// Simulate the repetition detection logic from the decode loop.
+    /// Returns the number of tokens accepted before the detector halts.
+    fn run_repetition_detector(token_sequence: &[u32]) -> usize {
+        let mut consecutive_repeats: usize = 0;
+        let mut last_token: Option<u32> = None;
+        let mut accepted = 0;
+
+        for &next_token in token_sequence {
+            if last_token == Some(next_token) {
+                consecutive_repeats += 1;
+                if consecutive_repeats >= MAX_CONSECUTIVE_DUPLICATES {
+                    break;
+                }
+            } else {
+                consecutive_repeats = 0;
+            }
+            last_token = Some(next_token);
+            accepted += 1;
+        }
+        accepted
+    }
+
+    #[test]
+    fn repetition_detector_no_repeats() {
+        // All distinct tokens: all accepted
+        assert_eq!(run_repetition_detector(&[1, 2, 3, 4, 5]), 5);
+    }
+
+    #[test]
+    fn repetition_detector_two_duplicates_halts() {
+        // Token 7 appears 3 times: original + 2 duplicates → halt on 3rd
+        assert_eq!(run_repetition_detector(&[7, 7, 7, 99]), 2);
+    }
+
+    #[test]
+    fn repetition_detector_one_duplicate_continues() {
+        // Token 7 appears twice (1 duplicate), then different token → no halt
+        assert_eq!(run_repetition_detector(&[7, 7, 8]), 3);
+    }
+
+    #[test]
+    fn repetition_detector_reset_between_runs() {
+        // Two separate runs of 2: A A B B → no halt (each run only 1 duplicate)
+        assert_eq!(run_repetition_detector(&[1, 1, 2, 2, 3]), 5);
+    }
+
+    #[test]
+    fn repetition_detector_halts_exactly_at_threshold() {
+        // Exactly MAX_CONSECUTIVE_DUPLICATES + 1 = 3 of the same token
+        // Should accept 2 (original + 1 duplicate), halt before accepting 3rd
+        assert_eq!(run_repetition_detector(&[5, 5, 5]), 2);
+    }
+
+    #[test]
+    fn repetition_detector_empty_input() {
+        assert_eq!(run_repetition_detector(&[]), 0);
+    }
+
+    #[test]
+    fn repetition_detector_single_token() {
+        assert_eq!(run_repetition_detector(&[42]), 1);
+    }
+
+    // ── model_to_repo tests ─────────────────────────────────────────────
+
+    #[test]
+    fn model_to_repo_short_name() {
+        assert_eq!(model_to_repo("large-v3"), "openai/whisper-large-v3");
+        assert_eq!(model_to_repo("tiny.en"), "openai/whisper-tiny.en");
+        assert_eq!(model_to_repo("base"), "openai/whisper-base");
+    }
+
+    #[test]
+    fn model_to_repo_full_repo_id() {
+        // Already contains '/' → passthrough
+        assert_eq!(model_to_repo("openai/whisper-large-v3"), "openai/whisper-large-v3");
+        assert_eq!(model_to_repo("custom-org/my-model"), "custom-org/my-model");
     }
 }
