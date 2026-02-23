@@ -77,12 +77,32 @@ impl Default for RouterConfig {
 pub struct ActionConfig {
     #[serde(default = "default_action_backend")]
     pub backend: String,
+    /// Claude model for computer-use agent (default: claude-sonnet-4-20250514).
+    #[serde(default)]
+    pub cu_model: Option<String>,
+    /// Anthropic API base URL (default: https://api.anthropic.com).
+    #[serde(default)]
+    pub cu_api_base_url: Option<String>,
+    /// Max agent loop iterations (default: 10).
+    #[serde(default)]
+    pub cu_max_iterations: Option<u32>,
+    /// Max UI tree depth sent to LLM (default: 8).
+    #[serde(default)]
+    pub cu_max_tree_depth: Option<usize>,
+    /// Include screenshots in agent context (default: false).
+    #[serde(default)]
+    pub cu_include_screenshots: Option<bool>,
 }
 
 impl Default for ActionConfig {
     fn default() -> Self {
         Self {
             backend: default_action_backend(),
+            cu_model: None,
+            cu_api_base_url: None,
+            cu_max_iterations: None,
+            cu_max_tree_depth: None,
+            cu_include_screenshots: None,
         }
     }
 }
@@ -91,12 +111,16 @@ impl Default for ActionConfig {
 pub struct HotkeyConfig {
     #[serde(default = "default_hotkey_shortcut")]
     pub shortcut: String,
+    /// Computer-use hotkey shortcut string (optional, e.g. "Ctrl+Super+C").
+    #[serde(default)]
+    pub cu_shortcut: Option<String>,
 }
 
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
             shortcut: default_hotkey_shortcut(),
+            cu_shortcut: None,
         }
     }
 }

@@ -1,3 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/voxctrl-core", "crates/voxctrl-stt", "crates/voxctrl"]
+members = [
+    "crates/voxctrl-core",
+    "crates/voxctrl-stt",
+    "crates/voxctrl-cu",
+    "crates/voxctrl-cu-windows",
+    "crates/voxctrl-cu-macos",
+    "crates/voxctrl-cu-linux",
+    "crates/voxctrl",
+]

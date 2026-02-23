@@ -1,8 +1,6 @@
 //! Action Executor — pluggable trait + factory.
 
 pub mod type_text;
-#[cfg(feature = "action-computer-use")]
-pub mod computer_use;
 
 use crate::config::ActionConfig;
 use crate::router::Intent;
@@ -14,16 +12,31 @@ pub trait ActionExecutor: Send + Sync {
     fn name(&self) -> &str;
 }
 
+/// Function signature for an external factory that can create action backends.
+///
+/// Called by `create_action()` for backend names it doesn't know.
+/// Returns `Some(executor)` if the factory handles this backend,
+/// or `None` to fall through to the "unknown backend" error.
+pub type ActionFactory =
+    dyn Fn(&ActionConfig) -> Option<anyhow::Result<Box<dyn ActionExecutor>>> + Send + Sync;
+
 /// Create an action executor based on config.
-pub fn create_action(cfg: &ActionConfig) -> anyhow::Result<Box<dyn ActionExecutor>> {
+///
+/// `extra_factory` allows external crates (e.g. voxctrl-cu) to inject backends
+/// without this crate needing to depend on their libraries.
+pub fn create_action(
+    cfg: &ActionConfig,
+    extra_factory: Option<&ActionFactory>,
+) -> anyhow::Result<Box<dyn ActionExecutor>> {
     match cfg.backend.as_str() {
         "type-text" => Ok(Box::new(type_text::TypeTextAction)),
-        "computer-use" => {
-            #[cfg(feature = "action-computer-use")]
-            return Ok(Box::new(computer_use::ComputerUseAction::new(cfg)?));
-            #[cfg(not(feature = "action-computer-use"))]
-            anyhow::bail!("action-computer-use feature not compiled in");
+        other => {
+            if let Some(factory) = extra_factory {
+                if let Some(result) = factory(cfg) {
+                    return result;
+                }
+            }
+            anyhow::bail!("Unknown action backend: {other}");
         }
-        other => anyhow::bail!("Unknown action backend: {other}"),
     }
 }

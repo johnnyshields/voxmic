@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::action::ActionExecutor;
+use crate::action::{ActionExecutor, ActionFactory};
 use crate::config::Config;
 use crate::router::{Intent, IntentRouter};
 use crate::stt::{SttFactory, Transcriber};
@@ -20,14 +20,16 @@ impl Pipeline {
     /// local model files (e.g. voxtral-native). Other backends ignore it.
     ///
     /// `stt_factory` allows external crates to inject heavy STT backends.
+    /// `action_factory` allows external crates to inject action backends (e.g. computer-use).
     pub fn from_config(
         cfg: &Config,
         stt_model_dir: Option<PathBuf>,
         stt_factory: Option<&SttFactory>,
+        action_factory: Option<&ActionFactory>,
     ) -> anyhow::Result<Self> {
         let stt = crate::stt::create_transcriber(&cfg.stt, stt_model_dir, stt_factory)?;
         let router = crate::router::create_router(&cfg.router)?;
-        let action = crate::action::create_action(&cfg.action)?;
+        let action = crate::action::create_action(&cfg.action, action_factory)?;
 
         log::info!(
             "Pipeline: STT={}, Router={}, Action={}",

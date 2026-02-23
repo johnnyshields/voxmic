@@ -17,9 +17,6 @@ vad-silero = ["dep:ort"]
 # Router
 router-llm = ["stt-voxtral-http"]
 
-# Action
-action-computer-use = []
-
 # GPU acceleration (opt-in, cross-cutting)
 cuda = []
 

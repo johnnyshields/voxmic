@@ -20,8 +20,10 @@ vad-silero = ["voxctrl-core/vad-silero"]
 # Router — forwarded to core
 router-llm = ["voxctrl-core/router-llm"]
 
-# Action — forwarded to core
-action-computer-use = ["voxctrl-core/action-computer-use"]
+# Computer-use — platform-specific accessibility providers
+cu-windows = ["dep:voxctrl-cu", "dep:voxctrl-cu-windows"]
+cu-macos   = ["dep:voxctrl-cu", "dep:voxctrl-cu-macos"]
+cu-linux   = ["dep:voxctrl-cu", "dep:voxctrl-cu-linux"]
 
 # GPU acceleration (opt-in, cross-cutting)
 cuda = ["voxctrl-core/cuda", "voxctrl-stt/cuda"]
@@ -36,6 +38,12 @@ tui = ["dep:ratatui", "dep:crossterm"]
 [dependencies]
 voxctrl-core = { path = "../voxctrl-core", default-features = false }
 voxctrl-stt  = { path = "../voxctrl-stt", default-features = false }
+
+# Computer-use (optional, feature-gated)
+voxctrl-cu         = { path = "../voxctrl-cu", optional = true }
+voxctrl-cu-windows = { path = "../voxctrl-cu-windows", optional = true }
+voxctrl-cu-macos   = { path = "../voxctrl-cu-macos", optional = true }
+voxctrl-cu-linux   = { path = "../voxctrl-cu-linux", optional = true }
 
 anyhow     = "1"
 log        = "0.4"

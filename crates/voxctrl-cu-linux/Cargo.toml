@@ -1,0 +1,17 @@
+[package]
+name = "voxctrl-cu-linux"
+version = "0.2.0"
+edition = "2021"
+description = "Computer-use — Linux AT-SPI2 provider (stub)"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Will be enabled when implementing the real provider:
+# atspi = "0.29"
+# zbus = "5"
+# tokio = { version = "1", features = ["rt"] }
+
+[dependencies]
+voxctrl-cu = { path = "../voxctrl-cu" }
+voxctrl-core = { path = "../voxctrl-core", default-features = false }
+anyhow = "1"
+log = "0.4"

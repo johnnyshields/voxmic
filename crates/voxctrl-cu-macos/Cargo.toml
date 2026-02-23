@@ -1,0 +1,15 @@
+[package]
+name = "voxctrl-cu-macos"
+version = "0.2.0"
+edition = "2021"
+description = "Computer-use — macOS AXAccessibility provider (stub)"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# objc2-application-services will be added when implementing the real provider
+# objc2-application-services = "0.3"
+
+[dependencies]
+voxctrl-cu = { path = "../voxctrl-cu" }
+voxctrl-core = { path = "../voxctrl-core", default-features = false }
+anyhow = "1"
+log = "0.4"

@@ -143,6 +143,13 @@ enum CaptureState {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // ComputerUse only used when cu-* features enabled
+enum CaptureTarget {
+    Dictation,
+    ComputerUse,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Settings,
     Test,
@@ -176,6 +183,22 @@ struct TestState {
     stt_result_slot: Option<Arc<std::sync::Mutex<Option<String>>>>,
     stt_status_slot: Option<Arc<std::sync::Mutex<Option<String>>>>,
 
+    // Step 5: Computer Use test (fields used when cu-* features enabled)
+    #[allow(dead_code)]
+    cu_goal: String,
+    #[allow(dead_code)]
+    cu_use_mock: bool,
+    #[allow(dead_code)]
+    cu_running: bool,
+    #[allow(dead_code)]
+    cu_log: Vec<String>,
+    #[allow(dead_code)]
+    cu_summary: String,
+    #[allow(dead_code)]
+    cu_event_rx: Option<std::sync::mpsc::Receiver<String>>,
+    #[allow(dead_code)]
+    cu_done_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+
     // Shared audio buffer for recording
     test_chunks: Arc<std::sync::Mutex<Vec<f32>>>,
     recording: Arc<std::sync::atomic::AtomicBool>,
@@ -196,6 +219,13 @@ impl Default for TestState {
             stt_result: String::new(),
             stt_result_slot: None,
             stt_status_slot: None,
+            cu_goal: String::new(),
+            cu_use_mock: true,
+            cu_running: false,
+            cu_log: Vec::new(),
+            cu_summary: String::new(),
+            cu_event_rx: None,
+            cu_done_rx: None,
             test_chunks: Arc::new(std::sync::Mutex::new(Vec::new())),
             recording: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -212,6 +242,7 @@ pub struct SettingsApp {
     available_devices: Vec<String>,
     selected_device: String,
     hotkey_shortcut: String,
+    hotkey_cu_shortcut: String,
     stt_backend: String,
     whisper_model: String,
     vad_backend: String,
@@ -222,10 +253,14 @@ pub struct SettingsApp {
     saved_flash: Option<std::time::Instant>,
     // Hotkey capture
     capture_state: CaptureState,
+    capture_target: CaptureTarget,
     hotkey_include_super: bool,
+    hotkey_cu_include_super: bool,
     // Test tab
     test_hotkey: Option<TestHotkeyState>,
     test_hotkey_error: Option<String>,
+    test_hotkey_cu: Option<TestHotkeyState>,
+    test_hotkey_cu_error: Option<String>,
 }
 
 // ── Subprocess launcher ───────────────────────────────────────────────────
@@ -281,6 +316,7 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
         available_devices: voxctrl_core::audio::list_input_devices(),
         selected_device: cfg.audio.device_pattern.clone(),
         hotkey_shortcut: cfg.hotkey.shortcut.clone(),
+        hotkey_cu_shortcut: cfg.hotkey.cu_shortcut.clone().unwrap_or_default(),
         stt_backend: cfg.stt.backend.clone(),
         whisper_model: cfg.stt.whisper_model.clone(),
         vad_backend: cfg.vad.backend.clone(),
@@ -290,9 +326,15 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
         model_paths: cfg.models.model_paths.clone(),
         saved_flash: None,
         capture_state: CaptureState::Idle,
+        capture_target: CaptureTarget::Dictation,
         hotkey_include_super: include_super,
+        hotkey_cu_include_super: cfg.hotkey.cu_shortcut.as_deref().map_or(false, |s| {
+            s.to_lowercase().split('+').any(|t| matches!(t.trim(), "super" | "win" | "meta" | "cmd"))
+        }),
         test_hotkey: None,
         test_hotkey_error: None,
+        test_hotkey_cu: None,
+        test_hotkey_cu_error: None,
     };
 
     let options = eframe::NativeOptions {
@@ -316,6 +358,10 @@ impl eframe::App for SettingsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ── Handle key capture ────────────────────────────────────────
         if self.capture_state == CaptureState::Listening {
+            let include_super = match self.capture_target {
+                CaptureTarget::Dictation => self.hotkey_include_super,
+                CaptureTarget::ComputerUse => self.hotkey_cu_include_super,
+            };
             let captured = ctx.input(|i| {
                 for event in &i.events {
                     if let egui::Event::Key {
@@ -330,7 +376,7 @@ impl eframe::App for SettingsApp {
                             return Some(None); // cancel
                         }
                         if let Some(shortcut) =
-                            build_shortcut_string(modifiers, *key, self.hotkey_include_super)
+                            build_shortcut_string(modifiers, *key, include_super)
                         {
                             if crate::hotkey::parse_shortcut(&shortcut).is_ok() {
                                 return Some(Some(shortcut));
@@ -344,7 +390,10 @@ impl eframe::App for SettingsApp {
             match captured {
                 Some(None) => self.capture_state = CaptureState::Idle,
                 Some(Some(shortcut)) => {
-                    self.hotkey_shortcut = shortcut;
+                    match self.capture_target {
+                        CaptureTarget::Dictation => self.hotkey_shortcut = shortcut,
+                        CaptureTarget::ComputerUse => self.hotkey_cu_shortcut = shortcut,
+                    }
                     self.capture_state = CaptureState::Idle;
                 }
                 None => {}
@@ -364,8 +413,16 @@ impl eframe::App for SettingsApp {
 
         // ── Poll hotkey events on Test tab ────────────────────────────
         if self.tab == Tab::Test {
-            if let Some(ref mut state) = self.test_hotkey {
-                while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+                if let Some(ref mut state) = self.test_hotkey {
+                    if event.id == state.hotkey_id {
+                        state.pressed = match event.state {
+                            HotKeyState::Pressed => true,
+                            HotKeyState::Released => false,
+                        };
+                    }
+                }
+                if let Some(ref mut state) = self.test_hotkey_cu {
                     if event.id == state.hotkey_id {
                         state.pressed = match event.state {
                             HotKeyState::Pressed => true,
@@ -446,22 +503,8 @@ impl SettingsApp {
 
                 // ── Hotkey capture widget ─────────────────────────────
                 ui.label("Hotkey");
-                ui.horizontal(|ui| match self.capture_state {
-                    CaptureState::Idle => {
-                        let label = if self.hotkey_shortcut.is_empty() {
-                            "Click to set hotkey..."
-                        } else {
-                            &self.hotkey_shortcut
-                        };
-                        if ui.button(label).clicked() {
-                            self.capture_state = CaptureState::Listening;
-                        }
-                        if !self.hotkey_shortcut.is_empty() && ui.small_button("\u{2715}").clicked()
-                        {
-                            self.hotkey_shortcut.clear();
-                        }
-                    }
-                    CaptureState::Listening => {
+                ui.horizontal(|ui| {
+                    if self.capture_state == CaptureState::Listening && self.capture_target == CaptureTarget::Dictation {
                         let mods = ui.ctx().input(|i| i.modifiers);
                         let mut parts: Vec<&str> = Vec::new();
                         if mods.ctrl || mods.command {
@@ -487,6 +530,21 @@ impl SettingsApp {
                         if ui.button("Cancel").clicked() {
                             self.capture_state = CaptureState::Idle;
                         }
+                    } else {
+                        let label = if self.hotkey_shortcut.is_empty() {
+                            "Click to set hotkey..."
+                        } else {
+                            &self.hotkey_shortcut
+                        };
+                        let enabled = self.capture_state == CaptureState::Idle;
+                        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                            self.capture_state = CaptureState::Listening;
+                            self.capture_target = CaptureTarget::Dictation;
+                        }
+                        if !self.hotkey_shortcut.is_empty() && ui.small_button("\u{2715}").clicked()
+                        {
+                            self.hotkey_shortcut.clear();
+                        }
                     }
                 });
                 ui.end_row();
@@ -499,6 +557,52 @@ impl SettingsApp {
                     self.toggle_super_in_shortcut();
                 }
                 ui.end_row();
+
+                // ── Computer Use Hotkey ─────────────────────────────
+                #[cfg(any(feature = "cu-windows", feature = "cu-macos", feature = "cu-linux"))]
+                {
+                    ui.label("CU Hotkey");
+                    ui.horizontal(|ui| {
+                        if self.capture_state == CaptureState::Listening && self.capture_target == CaptureTarget::ComputerUse {
+                            let mods = ui.ctx().input(|i| i.modifiers);
+                            let mut parts: Vec<&str> = Vec::new();
+                            if mods.ctrl || mods.command { parts.push("Ctrl"); }
+                            if mods.alt { parts.push("Alt"); }
+                            if mods.shift { parts.push("Shift"); }
+                            if self.hotkey_cu_include_super { parts.push("Super"); }
+                            let text = if parts.is_empty() {
+                                "Press keys...".to_string()
+                            } else {
+                                format!("{}+...", parts.join("+"))
+                            };
+                            ui.add(egui::Button::new(
+                                egui::RichText::new(text).color(egui::Color32::YELLOW),
+                            ));
+                            if ui.button("Cancel").clicked() {
+                                self.capture_state = CaptureState::Idle;
+                            }
+                        } else {
+                            let label = if self.hotkey_cu_shortcut.is_empty() {
+                                "Click to set CU hotkey..."
+                            } else {
+                                &self.hotkey_cu_shortcut
+                            };
+                            let enabled = self.capture_state == CaptureState::Idle;
+                            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                                self.capture_state = CaptureState::Listening;
+                                self.capture_target = CaptureTarget::ComputerUse;
+                            }
+                            if !self.hotkey_cu_shortcut.is_empty() && ui.small_button("\u{2715}").clicked() {
+                                self.hotkey_cu_shortcut.clear();
+                            }
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("");
+                    ui.checkbox(&mut self.hotkey_cu_include_super, "Include Super/Win key (CU)");
+                    ui.end_row();
+                }
 
                 // ── STT backend ───────────────────────────────────────
                 ui.label("STT Backend");
@@ -642,6 +746,11 @@ impl SettingsApp {
         let mut cfg = config::load_config();
         cfg.audio.device_pattern = self.selected_device.clone();
         cfg.hotkey.shortcut = self.hotkey_shortcut.clone();
+        cfg.hotkey.cu_shortcut = if self.hotkey_cu_shortcut.is_empty() {
+            None
+        } else {
+            Some(self.hotkey_cu_shortcut.clone())
+        };
         cfg.stt.backend = self.stt_backend.clone();
         cfg.stt.whisper_model = self.whisper_model.clone();
         cfg.vad.backend = self.vad_backend.clone();
@@ -674,6 +783,29 @@ impl SettingsApp {
             self.test.stt_result = result;
             self.test.stt_result_slot = None;
             self.test.stt_status_slot = None;
+        }
+
+        // Poll CU agent events
+        if let Some(ref rx) = self.test.cu_event_rx {
+            while let Ok(line) = rx.try_recv() {
+                self.test.cu_log.push(line);
+            }
+        }
+        if let Some(ref rx) = self.test.cu_done_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(summary) => {
+                        self.test.cu_summary = summary;
+                        self.test.cu_log.push("Agent completed successfully.".into());
+                    }
+                    Err(e) => {
+                        self.test.cu_log.push(format!("ERROR: {e}"));
+                    }
+                }
+                self.test.cu_running = false;
+                self.test.cu_event_rx = None;
+                self.test.cu_done_rx = None;
+            }
         }
 
         // Drain mic level readings
@@ -776,6 +908,35 @@ impl SettingsApp {
             } else {
                 ui.label("Registering hotkey...");
             }
+
+            // CU hotkey indicator
+            #[cfg(any(feature = "cu-windows", feature = "cu-macos", feature = "cu-linux"))]
+            {
+                if !self.hotkey_cu_shortcut.is_empty() {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("CU Hotkey:");
+                        if let Some(ref error) = self.test_hotkey_cu_error {
+                            ui.colored_label(egui::Color32::RED, error);
+                        } else if let Some(ref state) = self.test_hotkey_cu {
+                            let (color, label) = if state.pressed {
+                                (egui::Color32::GREEN, "ACTIVE")
+                            } else {
+                                (egui::Color32::YELLOW, "Ready")
+                            };
+                            let radius = 6.0;
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(radius * 2.0, radius * 2.0),
+                                egui::Sense::hover(),
+                            );
+                            ui.painter().circle_filled(rect.center(), radius, color);
+                            ui.label(egui::RichText::new(label).color(color));
+                        } else {
+                            ui.label("Not registered");
+                        }
+                    });
+                }
+            }
         });
 
         ui.add_space(4.0);
@@ -837,10 +998,84 @@ impl SettingsApp {
 
         ui.add_space(4.0);
 
-        // ── Step 5: Final Output ──
+        // ── Step 5: Computer Use ──
         ui.group(|ui| {
-            ui.strong("5. Output");
-            if !self.test.stt_result.is_empty() {
+            ui.horizontal(|ui| {
+                ui.strong("5. Computer Use");
+            });
+
+            #[cfg(any(feature = "cu-windows", feature = "cu-macos", feature = "cu-linux"))]
+            {
+                ui.horizontal(|ui| {
+                    ui.label("Goal:");
+                    ui.add(egui::TextEdit::singleline(&mut self.test.cu_goal)
+                        .desired_width(ui.available_width() - 60.0)
+                        .hint_text("e.g. Type 'Hello' in the text editor"));
+                });
+
+                // Pre-fill from STT result if goal is empty and STT has a result
+                if self.test.cu_goal.is_empty() && !self.test.stt_result.is_empty() {
+                    self.test.cu_goal = self.test.stt_result.clone();
+                }
+
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.test.cu_use_mock, "Dry-run (mock provider)");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.test.cu_running {
+                            ui.add_enabled(false, egui::Button::new("Running..."));
+                        } else if ui.button("Run").clicked() {
+                            self.start_cu_test();
+                        }
+                    });
+                });
+
+                if !self.test.cu_log.is_empty() {
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(150.0)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for line in &self.test.cu_log {
+                                let color = if line.starts_with("ERROR") {
+                                    egui::Color32::RED
+                                } else if line.starts_with("Tool:") {
+                                    egui::Color32::YELLOW
+                                } else if line.contains("successfully") {
+                                    egui::Color32::GREEN
+                                } else {
+                                    egui::Color32::GRAY
+                                };
+                                ui.colored_label(color, egui::RichText::new(line).monospace());
+                            }
+                        });
+                }
+
+                if !self.test.cu_summary.is_empty() {
+                    ui.separator();
+                    ui.label("Summary:");
+                    ui.monospace(&self.test.cu_summary);
+                }
+            }
+
+            #[cfg(not(any(feature = "cu-windows", feature = "cu-macos", feature = "cu-linux")))]
+            {
+                ui.colored_label(
+                    egui::Color32::GRAY,
+                    "Computer Use not available \u{2014} enable cu-windows feature",
+                );
+            }
+        });
+
+        ui.add_space(4.0);
+
+        // ── Step 6: Final Output ──
+        ui.group(|ui| {
+            ui.strong("6. Output");
+            if !self.test.cu_summary.is_empty() {
+                ui.label("Computer Use result:");
+                ui.monospace(&self.test.cu_summary);
+                ui.colored_label(egui::Color32::GREEN, "Full pipeline test complete!");
+            } else if !self.test.stt_result.is_empty() {
                 ui.label("Transcription result:");
                 ui.monospace(&self.test.stt_result);
                 ui.colored_label(egui::Color32::GREEN, "Pipeline test complete!");
@@ -916,6 +1151,92 @@ impl SettingsApp {
         });
     }
 
+    #[cfg(any(feature = "cu-windows", feature = "cu-macos", feature = "cu-linux"))]
+    fn start_cu_test(&mut self) {
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<String>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<String, String>>();
+
+        let goal = self.test.cu_goal.clone();
+        let use_mock = self.test.cu_use_mock;
+
+        self.test.cu_log.clear();
+        self.test.cu_running = true;
+        self.test.cu_summary.clear();
+        self.test.cu_event_rx = Some(event_rx);
+        self.test.cu_done_rx = Some(done_rx);
+
+        std::thread::spawn(move || {
+            let provider: Box<dyn voxctrl_cu::AccessibilityProvider> = if use_mock {
+                Box::new(voxctrl_cu::MockProvider::new())
+            } else {
+                // Fall back to mock if no real provider
+                Box::new(voxctrl_cu::MockProvider::new())
+            };
+
+            let cfg_file = voxctrl_core::config::load_config();
+            let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+
+            if api_key.is_empty() {
+                let _ = event_tx.send("ERROR: ANTHROPIC_API_KEY not set".into());
+                let _ = done_tx.send(Err("ANTHROPIC_API_KEY environment variable not set".into()));
+                return;
+            }
+
+            let agent_cfg = voxctrl_cu::AgentConfig {
+                api_key: voxctrl_cu::agent::ApiKey::new(api_key),
+                model: cfg_file.action.cu_model.unwrap_or_else(|| "claude-sonnet-4-20250514".into()),
+                api_base_url: cfg_file.action.cu_api_base_url.unwrap_or_else(|| "https://api.anthropic.com".into()),
+                max_iterations: cfg_file.action.cu_max_iterations.unwrap_or(10),
+                max_tree_depth: cfg_file.action.cu_max_tree_depth.unwrap_or(8),
+                include_screenshots: cfg_file.action.cu_include_screenshots.unwrap_or(false),
+            };
+
+            let (agent_event_tx, agent_event_rx) = std::sync::mpsc::channel();
+
+            // Forward agent events as formatted log lines
+            let event_tx_clone = event_tx.clone();
+            std::thread::spawn(move || {
+                while let Ok(event) = agent_event_rx.recv() {
+                    let line = match &event {
+                        voxctrl_cu::AgentEvent::IterationStart { iteration, max } => {
+                            format!("--- Iteration {iteration}/{max} ---")
+                        }
+                        voxctrl_cu::AgentEvent::LlmResponse { text } => {
+                            format!("LLM: {}", text.chars().take(200).collect::<String>())
+                        }
+                        voxctrl_cu::AgentEvent::ToolCall { name, input } => {
+                            format!("Tool: {name}({input})")
+                        }
+                        voxctrl_cu::AgentEvent::ActionResult { action, success, message } => {
+                            let status = if *success { "OK" } else { "ERROR" };
+                            format!("  -> {status}: {action} — {message}")
+                        }
+                        voxctrl_cu::AgentEvent::TreeUpdate { element_count, window_title } => {
+                            format!("Tree: {element_count} elements in \"{window_title}\"")
+                        }
+                    };
+                    let _ = event_tx_clone.send(line);
+                }
+            });
+
+            let _ = event_tx.send(format!("Starting agent with goal: {goal}"));
+
+            match voxctrl_cu::agent::run_agent_streaming(
+                &*provider,
+                &agent_cfg,
+                &goal,
+                Some(agent_event_tx),
+            ) {
+                Ok(result) => {
+                    let _ = done_tx.send(Ok(result.summary));
+                }
+                Err(e) => {
+                    let _ = done_tx.send(Err(format!("{e:#}")));
+                }
+            }
+        });
+    }
+
     fn register_test_hotkey(&mut self) {
         self.test_hotkey = None;
         self.test_hotkey_error = None;
@@ -953,11 +1274,47 @@ impl SettingsApp {
             hotkey_id: id,
             pressed: false,
         });
+
+        // Also register CU hotkey for test tab
+        self.test_hotkey_cu = None;
+        self.test_hotkey_cu_error = None;
+
+        if !self.hotkey_cu_shortcut.is_empty() {
+            let cu_hotkey: HotKey = match crate::hotkey::parse_shortcut(&self.hotkey_cu_shortcut) {
+                Ok(hk) => hk,
+                Err(e) => {
+                    self.test_hotkey_cu_error = Some(format!("Invalid CU hotkey: {e}"));
+                    return;
+                }
+            };
+
+            let cu_manager = match GlobalHotKeyManager::new() {
+                Ok(m) => m,
+                Err(e) => {
+                    self.test_hotkey_cu_error = Some(format!("Failed to create CU hotkey manager: {e}"));
+                    return;
+                }
+            };
+
+            let cu_id = cu_hotkey.id();
+            if let Err(e) = cu_manager.register(cu_hotkey) {
+                self.test_hotkey_cu_error = Some(format!("Failed to register CU hotkey: {e}"));
+                return;
+            }
+
+            self.test_hotkey_cu = Some(TestHotkeyState {
+                _manager: cu_manager,
+                hotkey_id: cu_id,
+                pressed: false,
+            });
+        }
     }
 
     fn unregister_test_hotkey(&mut self) {
         self.test_hotkey = None;
         self.test_hotkey_error = None;
+        self.test_hotkey_cu = None;
+        self.test_hotkey_cu_error = None;
     }
 }
 
