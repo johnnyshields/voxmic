@@ -1721,7 +1721,7 @@ fn spawn_download(info: ModelInfo, registry: Arc<Mutex<ModelRegistry>>) {
         let cfg = config::load_config();
         let mut reg = registry.lock().unwrap();
         reg.scan_cache(&cfg.models);
-        log::info!("Download complete for '{}'", info.id);
+        log::info!("Download complete for '{}' — restart app to use this model", info.id);
     });
 }
 
@@ -1817,6 +1817,16 @@ fn download_model_files(
             anyhow::anyhow!("HTTP request failed for {filename}: {e}{hint}")
         })?;
 
+        // Check content type — HF returns text/html for auth errors / gated models
+        let content_type = resp.header("content-type").unwrap_or("");
+        if content_type.contains("text/html") {
+            anyhow::bail!(
+                "HuggingFace returned HTML instead of model file for {filename}. \
+                 This usually means the model is gated or requires authentication. \
+                 Set your HF token in Settings → Models tab."
+            );
+        }
+
         let dest = snapshot_dir.join(filename);
 
         // Create parent dirs for nested files (e.g. "subdir/file.bin")
@@ -1827,12 +1837,14 @@ fn download_model_files(
         let mut out = std::fs::File::create(&dest)?;
         let mut reader = resp.into_reader();
         let mut buf = [0u8; 65536]; // 64 KB read chunks
+        let mut file_bytes: u64 = 0;
         loop {
             let n = reader.read(&mut buf)?;
             if n == 0 {
                 break;
             }
             out.write_all(&buf[..n])?;
+            file_bytes += n as u64;
             total_downloaded += n as u64;
 
             if total_downloaded - last_update_bytes >= UPDATE_INTERVAL {
@@ -1848,6 +1860,16 @@ fn download_model_files(
             }
         }
         out.flush()?;
+
+        // Validate: model files should be at least 1 KB (HTML error pages are small)
+        if file_bytes < 1024 && filename.ends_with(".safetensors") {
+            let _ = std::fs::remove_file(&dest);
+            anyhow::bail!(
+                "Downloaded {filename} is only {file_bytes} bytes — likely an error page, not model data. \
+                 Check your HF token and network connection."
+            );
+        }
+        log::info!("Downloaded {filename}: {} bytes", file_bytes);
     }
 
     Ok(())
