@@ -5,7 +5,7 @@ edition = "2021"
 description = "Pluggable voice-to-action pipeline — mic → VAD → STT → router → action"
 
 [features]
-default = ["stt-voxtral-http", "stt-voxtral-native", "stt-whisper-native", "vad-energy", "gui", "tui"]
+default = ["stt-voxtral-http", "stt-voxtral-native", "stt-whisper-native", "vad-energy", "gui", "tui", "zluda"]
 
 # STT backends — forwarded to sub-crates
 stt-voxtral-http    = ["voxctrl-core/stt-voxtral-http"]
