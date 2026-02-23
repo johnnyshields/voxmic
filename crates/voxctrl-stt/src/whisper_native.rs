@@ -146,6 +146,123 @@ impl WhisperNativeTranscriber {
         })
     }
 
+    /// Core inference: takes raw f32 PCM samples at any sample rate, resamples to 16 kHz,
+    /// runs mel spectrogram + encoder + greedy decode, and returns the transcribed text.
+    fn run_inference(&self, samples: &[f32], sample_rate: u32) -> anyhow::Result<String> {
+        let duration_secs = samples.len() as f64 / sample_rate as f64;
+        let (amin, amax, amean) = audio_stats(samples);
+        log::debug!(
+            "[whisper-dbg] PCM: {} samples, {:.2}s, min={:.4}, max={:.4}, mean={:.6}",
+            samples.len(), duration_secs, amin, amax, amean
+        );
+        if amax - amin < 1e-6 {
+            log::warn!("[whisper-dbg] Audio appears to be silence/constant!");
+        }
+
+        // ── Resample to 16 kHz if needed ─────────────────────────────
+        let samples = if sample_rate != m::SAMPLE_RATE as u32 {
+            let resampled = resample(samples, sample_rate, m::SAMPLE_RATE as u32);
+            log::debug!(
+                "[whisper-dbg] Resampled {}Hz -> {}Hz: {} samples ({:.2}s)",
+                sample_rate, m::SAMPLE_RATE, resampled.len(),
+                resampled.len() as f64 / m::SAMPLE_RATE as f64
+            );
+            resampled
+        } else {
+            samples.to_vec()
+        };
+
+        // ── Mel spectrogram (candle reference implementation) ─────────
+        let mel = m::audio::pcm_to_mel(&self.config, &samples, &self.mel_filters);
+        let n_mel = self.config.num_mel_bins;
+        let n_frames = mel.len() / n_mel;
+
+        let (mmin, mmax, mmean) = audio_stats(&mel);
+        log::debug!(
+            "[whisper-dbg] Mel: {} bins x {} frames, mel min={:.4}, max={:.4}, mean={:.4}",
+            n_mel, n_frames, mmin, mmax, mmean
+        );
+
+        let mel_tensor = Tensor::from_vec(mel, (1, n_mel, n_frames), &self.device)?;
+        log::debug!("[whisper-dbg] Mel tensor shape: {:?}", mel_tensor.dims());
+
+        // ── Encode ──────────────────────────────────────────────────────
+        let mut model = self
+            .model
+            .lock()
+            .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
+        let encoder_output = model.encoder.forward(&mel_tensor, true)?;
+        log::debug!("[whisper-dbg] Encoder output shape: {:?}", encoder_output.dims());
+
+        // ── Greedy decode ───────────────────────────────────────────────
+        let mut tokens: Vec<u32> = vec![self.sot_token];
+        if let Some(lang) = self.language_token {
+            tokens.push(lang);
+        }
+        tokens.push(self.transcribe_token);
+        tokens.push(self.no_timestamps_token);
+        let prompt_len = tokens.len();
+        log::debug!(
+            "[whisper-dbg] Prompt tokens: {:?} (sot={}, transcribe={}, no_ts={})",
+            tokens, self.sot_token, self.transcribe_token, self.no_timestamps_token
+        );
+
+        for step in 0..MAX_DECODE_TOKENS {
+            let flush = step == 0;
+
+            let token_t = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
+            let hidden = model.decoder.forward(&token_t, &encoder_output, flush)?;
+            let logits = model.decoder.final_linear(&hidden)?;
+
+            let seq_len = logits.dims()[1];
+            let last_logits = logits.i((0, seq_len - 1))?;
+
+            let mut last_logits = (last_logits + &self.suppress_mask)?;
+
+            if step == 0 {
+                last_logits = (last_logits + &self.begin_suppress_mask)?;
+            }
+
+            let next_token = last_logits
+                .argmax(0)?
+                .to_dtype(DType::U32)?
+                .to_scalar::<u32>()?;
+
+            if step < 10 || step % 50 == 0 {
+                let token_text = self.tokenizer.decode(&[next_token], false).unwrap_or_default();
+                let top_logit = last_logits.max(0)?.to_scalar::<f32>()?;
+                log::debug!(
+                    "[whisper-dbg] Step {}: token={} {:?}, logit={:.2}",
+                    step, next_token, token_text, top_logit
+                );
+            }
+
+            if next_token == self.eot_token {
+                log::debug!("[whisper-dbg] EOT at step {}", step);
+                break;
+            }
+            tokens.push(next_token);
+        }
+
+        drop(model); // release lock before tokenizer decode
+
+        let output_tokens: Vec<u32> = tokens[prompt_len..].to_vec();
+        log::debug!(
+            "[whisper-dbg] Output tokens ({}): {:?}",
+            output_tokens.len(),
+            &output_tokens[..output_tokens.len().min(30)]
+        );
+
+        let text = self
+            .tokenizer
+            .decode(&output_tokens, true)
+            .map_err(|e| anyhow::anyhow!("tokenizer decode: {e}"))?;
+        let text = text.trim().to_string();
+
+        log::info!("[whisper-dbg] Final text: {:?}", text);
+        Ok(text)
+    }
+
     /// Download model files via hf_hub API.
     fn resolve_via_hub(cfg: &SttConfig) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {
         let repo_id = model_to_repo(&cfg.whisper_model);
@@ -184,14 +301,14 @@ fn load_mel_filters(num_mel_bins: usize) -> anyhow::Result<Vec<f32>> {
 
 impl Transcriber for WhisperNativeTranscriber {
     fn transcribe(&self, wav_path: &Path) -> anyhow::Result<String> {
-        // ── Load & normalise audio ──────────────────────────────────────
+        // ── Load WAV → extract f32 PCM + sample_rate ────────────────
         let reader = hound::WavReader::open(wav_path)?;
         let spec = reader.spec();
         log::debug!(
             "[whisper-dbg] WAV: {:?}, channels={}, sample_rate={}, bits={}, format={:?}",
             wav_path, spec.channels, spec.sample_rate, spec.bits_per_sample, spec.sample_format
         );
-        let raw: Vec<f32> = if spec.bits_per_sample == 16 {
+        let samples: Vec<f32> = if spec.bits_per_sample == 16 {
             reader
                 .into_samples::<i16>()
                 .map(|s| s.map(|v| v as f32 / 32768.0))
@@ -200,128 +317,11 @@ impl Transcriber for WhisperNativeTranscriber {
             reader.into_samples::<f32>().collect::<Result<_, _>>()?
         };
 
-        let duration_secs = raw.len() as f64 / spec.sample_rate as f64;
-        let (amin, amax, amean) = audio_stats(&raw);
-        log::debug!(
-            "[whisper-dbg] PCM: {} samples, {:.2}s, min={:.4}, max={:.4}, mean={:.6}",
-            raw.len(), duration_secs, amin, amax, amean
-        );
-        if amax - amin < 1e-6 {
-            log::warn!("[whisper-dbg] Audio appears to be silence/constant!");
-        }
+        self.run_inference(&samples, spec.sample_rate)
+    }
 
-        // ── Resample to 16 kHz if needed ─────────────────────────────
-        let raw = if spec.sample_rate != m::SAMPLE_RATE as u32 {
-            let raw = resample(&raw, spec.sample_rate, m::SAMPLE_RATE as u32);
-            log::debug!(
-                "[whisper-dbg] Resampled {}Hz -> {}Hz: {} samples ({:.2}s)",
-                spec.sample_rate, m::SAMPLE_RATE, raw.len(),
-                raw.len() as f64 / m::SAMPLE_RATE as f64
-            );
-            raw
-        } else {
-            raw
-        };
-
-        // ── Mel spectrogram (candle reference implementation) ─────────
-        // pcm_to_mel pads the audio to produce exactly N_FRAMES (3000) frames,
-        // matching whisper's 30-second chunk design.  The encoder's conv2 (stride 2)
-        // halves this to max_source_positions (1500) before the positional embedding.
-        let mel = m::audio::pcm_to_mel(&self.config, &raw, &self.mel_filters);
-        let n_mel = self.config.num_mel_bins;
-        let n_frames = mel.len() / n_mel;
-
-        let (mmin, mmax, mmean) = audio_stats(&mel);
-        log::debug!(
-            "[whisper-dbg] Mel: {} bins x {} frames, mel min={:.4}, max={:.4}, mean={:.4}",
-            n_mel, n_frames, mmin, mmax, mmean
-        );
-
-        let mel_tensor = Tensor::from_vec(mel, (1, n_mel, n_frames), &self.device)?;
-        log::debug!("[whisper-dbg] Mel tensor shape: {:?}", mel_tensor.dims());
-
-        // ── Encode ──────────────────────────────────────────────────────
-        let mut model = self
-            .model
-            .lock()
-            .map_err(|e| anyhow::anyhow!("lock poisoned: {e}"))?;
-        let encoder_output = model.encoder.forward(&mel_tensor, true)?;
-        log::debug!("[whisper-dbg] Encoder output shape: {:?}", encoder_output.dims());
-
-        // ── Greedy decode ───────────────────────────────────────────────
-        let mut tokens: Vec<u32> = vec![self.sot_token];
-        if let Some(lang) = self.language_token {
-            tokens.push(lang);
-        }
-        tokens.push(self.transcribe_token);
-        tokens.push(self.no_timestamps_token);
-        let prompt_len = tokens.len();
-        log::debug!(
-            "[whisper-dbg] Prompt tokens: {:?} (sot={}, transcribe={}, no_ts={})",
-            tokens, self.sot_token, self.transcribe_token, self.no_timestamps_token
-        );
-
-        for step in 0..MAX_DECODE_TOKENS {
-            // Pass the full token sequence every step — the candle decoder's
-            // self-attention doesn't use KV caching, so it needs all tokens.
-            // Cross-attention KV cache is reused after the first forward pass.
-            let flush = step == 0;
-
-            let token_t = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
-            let hidden = model.decoder.forward(&token_t, &encoder_output, flush)?;
-            let logits = model.decoder.final_linear(&hidden)?;
-
-            let seq_len = logits.dims()[1];
-            let last_logits = logits.i((0, seq_len - 1))?;
-
-            // Suppress special/timestamp tokens by setting their logits to -inf.
-            let mut last_logits = (last_logits + &self.suppress_mask)?;
-
-            // On the first output token, also suppress begin_suppress_tokens
-            // (includes EOT to prevent the model from immediately predicting "no speech").
-            if step == 0 {
-                last_logits = (last_logits + &self.begin_suppress_mask)?;
-            }
-
-            let next_token = last_logits
-                .argmax(0)?
-                .to_dtype(DType::U32)?
-                .to_scalar::<u32>()?;
-
-            // Log first 10 tokens and every 50th after that
-            if step < 10 || step % 50 == 0 {
-                let token_text = self.tokenizer.decode(&[next_token], false).unwrap_or_default();
-                let top_logit = last_logits.max(0)?.to_scalar::<f32>()?;
-                log::debug!(
-                    "[whisper-dbg] Step {}: token={} {:?}, logit={:.2}",
-                    step, next_token, token_text, top_logit
-                );
-            }
-
-            if next_token == self.eot_token {
-                log::debug!("[whisper-dbg] EOT at step {}", step);
-                break;
-            }
-            tokens.push(next_token);
-        }
-
-        drop(model); // release lock before tokenizer decode
-
-        let output_tokens: Vec<u32> = tokens[prompt_len..].to_vec();
-        log::debug!(
-            "[whisper-dbg] Output tokens ({}): {:?}",
-            output_tokens.len(),
-            &output_tokens[..output_tokens.len().min(30)]
-        );
-
-        let text = self
-            .tokenizer
-            .decode(&output_tokens, true)
-            .map_err(|e| anyhow::anyhow!("tokenizer decode: {e}"))?;
-        let text = text.trim().to_string();
-
-        log::info!("[whisper-dbg] Final text: {:?}", text);
-        Ok(text)
+    fn transcribe_pcm(&self, samples: &[f32], sample_rate: u32) -> anyhow::Result<String> {
+        self.run_inference(samples, sample_rate)
     }
 
     fn name(&self) -> &str {

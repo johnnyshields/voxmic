@@ -11,6 +11,33 @@ use crate::config::SttConfig;
 pub trait Transcriber: Send + Sync {
     /// Transcribe audio from a WAV file path.
     fn transcribe(&self, wav_path: &Path) -> anyhow::Result<String>;
+
+    /// Transcribe from raw f32 PCM samples at the given sample rate.
+    ///
+    /// Default implementation writes a temp WAV and delegates to `transcribe(path)`.
+    /// Backends that can work directly with PCM (e.g. whisper-native) should
+    /// override this to skip the WAV round-trip.
+    fn transcribe_pcm(&self, samples: &[f32], sample_rate: u32) -> anyhow::Result<String> {
+        let tmp = tempfile::Builder::new()
+            .suffix(".wav")
+            .tempfile()
+            .map_err(|e| anyhow::anyhow!("create temp WAV: {e}"))?;
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(tmp.path(), spec)
+            .map_err(|e| anyhow::anyhow!("create WAV writer: {e}"))?;
+        for &s in samples {
+            let s16 = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
+            writer.write_sample(s16)?;
+        }
+        writer.finalize()?;
+        self.transcribe(tmp.path())
+    }
+
     /// Human-readable name for logs and UI.
     fn name(&self) -> &str;
     /// Check if the backend is reachable / functional.
