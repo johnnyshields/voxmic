@@ -102,13 +102,14 @@ pub fn list_input_devices() -> Vec<String> {
 ///
 /// Returns (stream, level_receiver). The stream must be kept alive.
 /// `test_chunks` receives raw f32 samples when `recording` is true.
+/// Returns `(stream, actual_sample_rate)`.
 pub fn start_test_capture(
     device_pattern: &str,
     sample_rate: u32,
     level_tx: std::sync::mpsc::Sender<f32>,
     test_chunks: Arc<std::sync::Mutex<Vec<f32>>>,
     recording: Arc<AtomicBool>,
-) -> Result<cpal::Stream> {
+) -> Result<(cpal::Stream, u32)> {
     let host = cpal::default_host();
     let pattern = device_pattern.to_lowercase();
     let device = host
@@ -140,9 +141,14 @@ pub fn start_test_capture(
             let default = device
                 .default_input_config()
                 .context("No default input config")?;
+            log::warn!("Device does not support {}Hz, using default {}Hz",
+                sample_rate, default.sample_rate().0);
             default.into()
         }
     };
+
+    let actual_rate = stream_config.sample_rate.0;
+    log::info!("Test capture: device={:?}, actual_rate={}Hz", device.name(), actual_rate);
 
     let stream = device
         .build_input_stream(
@@ -166,5 +172,5 @@ pub fn start_test_capture(
         .context("Failed to build test audio input stream")?;
 
     stream.play().context("Failed to start test audio stream")?;
-    Ok(stream)
+    Ok((stream, actual_rate))
 }

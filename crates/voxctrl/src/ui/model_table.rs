@@ -276,6 +276,7 @@ struct TestState {
     mic_level: f32,
     mic_stream: Option<cpal::Stream>,
     mic_level_rx: Option<std::sync::mpsc::Receiver<f32>>,
+    mic_sample_rate: u32,
 
     // Step 2: Hotkey test
     hotkey_bypass: bool,
@@ -319,6 +320,7 @@ impl Default for TestState {
             mic_level: 0.0,
             mic_stream: None,
             mic_level_rx: None,
+            mic_sample_rate: 16000,
             hotkey_bypass: false,
             hotkey_detected: false,
             vad_bypass: true,
@@ -1300,10 +1302,11 @@ impl SettingsApp {
             Arc::clone(&self.test.test_chunks),
             Arc::clone(&self.test.recording),
         ) {
-            Ok(stream) => {
+            Ok((stream, actual_rate)) => {
                 self.test.mic_stream = Some(stream);
                 self.test.mic_level_rx = Some(rx);
                 self.test.mic_active = true;
+                self.test.mic_sample_rate = actual_rate;
             }
             Err(e) => {
                 log::error!("Failed to start mic test: {e}");
@@ -1332,7 +1335,7 @@ impl SettingsApp {
             return;
         }
 
-        let sample_rate = cfg.audio.sample_rate;
+        let sample_rate = self.test.mic_sample_rate;
         let stt_cfg = cfg.stt.clone();
 
         let result_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -1369,24 +1372,9 @@ impl SettingsApp {
         self.test.stt_status = format!("Transcribing {}...", path.file_name().unwrap_or_default().to_string_lossy());
         self.test.stt_result.clear();
 
-        // Read WAV and extract f32 PCM samples.
-        let samples = match (|| -> anyhow::Result<Vec<f32>> {
-            let reader = hound::WavReader::open(&path)?;
-            let spec = reader.spec();
-            if spec.channels != 1 {
-                anyhow::bail!("Expected mono WAV, got {} channels", spec.channels);
-            }
-            let samples: Vec<f32> = if spec.bits_per_sample == 16 {
-                reader
-                    .into_samples::<i16>()
-                    .map(|s| s.map(|v| v as f32 / 32768.0))
-                    .collect::<Result<_, _>>()?
-            } else {
-                reader.into_samples::<f32>().collect::<Result<_, _>>()?
-            };
-            Ok(samples)
-        })() {
-            Ok(s) => s,
+        // Send the original WAV file directly — preserves the correct sample rate.
+        let wav_data = match std::fs::read(&path) {
+            Ok(d) => d,
             Err(e) => {
                 self.test.stt_status = format!("Load error: {e}");
                 return;
@@ -1394,7 +1382,6 @@ impl SettingsApp {
         };
 
         let stt_cfg = cfg.stt.clone();
-        let sample_rate = cfg.audio.sample_rate;
 
         let result_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let status_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -1405,7 +1392,7 @@ impl SettingsApp {
         self.test.stt_status_slot = Some(status_slot);
 
         std::thread::spawn(move || {
-            match transcribe_chunks(&samples, sample_rate, &stt_cfg) {
+            match transcribe_wav_data(&wav_data, &stt_cfg) {
                 Ok(text) => {
                     *result_writer.lock().unwrap() = Some(text);
                     *status_writer.lock().unwrap() = Some("Done".into());
@@ -1633,6 +1620,36 @@ fn transcribe_chunks(
         }
         Err(server_err) => {
             log::warn!("[testbed] Server unavailable ({server_err:#}), trying direct transcriber...");
+            let transcriber = voxctrl_core::stt::create_transcriber(stt_cfg, None, Some(&voxctrl_stt::stt_factory))?;
+            let result = transcriber.transcribe(tmp.path());
+            match &result {
+                Ok(text) => log::info!("[testbed] Direct transcription OK: {:?}", text),
+                Err(e) => log::error!("[testbed] Direct transcription failed: {e:#}"),
+            }
+            result
+        }
+    }
+}
+
+/// Transcribe from raw WAV bytes (e.g. loaded from a file).
+fn transcribe_wav_data(
+    wav_data: &[u8],
+    stt_cfg: &config::SttConfig,
+) -> anyhow::Result<String> {
+    log::info!("[testbed] transcribe_wav_data: {} bytes", wav_data.len());
+
+    // Try the named-pipe STT server first.
+    log::info!("[testbed] Trying STT via named-pipe server...");
+    match voxctrl_core::stt_client::transcribe_via_server(wav_data) {
+        Ok(text) => {
+            log::info!("[testbed] Server transcription OK: {:?}", text);
+            Ok(text)
+        }
+        Err(server_err) => {
+            log::warn!("[testbed] Server unavailable ({server_err:#}), trying direct transcriber...");
+            // Write to temp file for transcriber API
+            let tmp = tempfile::Builder::new().suffix(".wav").tempfile()?;
+            std::fs::write(tmp.path(), wav_data)?;
             let transcriber = voxctrl_core::stt::create_transcriber(stt_cfg, None, Some(&voxctrl_stt::stt_factory))?;
             let result = transcriber.transcribe(tmp.path());
             match &result {
