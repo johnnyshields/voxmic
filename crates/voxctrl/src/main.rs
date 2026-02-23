@@ -125,7 +125,7 @@ fn run_gui(
                         if let Some(ref mgr) = self.hotkey_manager {
                             hotkey::unregister_hotkeys(mgr, &self.hotkey_ids);
                         }
-                        self.settings_child = ui::open_settings(self.registry.clone());
+                        self.settings_child = ui::open_settings();
                     } else {
                         log::info!("Settings already open");
                     }
@@ -173,7 +173,7 @@ fn run_gui(
 
     let (hotkey_manager, hotkey_ids) = match hotkey::setup_hotkeys(&cfg.hotkey) {
         Ok(Some((mgr, ids))) => (Some(mgr), ids),
-        Ok(None) => (None, hotkey::HotkeyIds { dictation: None, computer_use: None, dict_hotkey: None, cu_hotkey: None }),
+        Ok(None) => (None, hotkey::HotkeyIds::none()),
         Err(e) => return Err(e),
     };
 

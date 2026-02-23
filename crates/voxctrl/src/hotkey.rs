@@ -10,12 +10,16 @@ use voxctrl_core::config::{Config, HotkeyConfig};
 use voxctrl_core::pipeline::Pipeline;
 use voxctrl_core::SharedState;
 
-/// IDs for the registered global hotkeys.
+/// Registered global hotkeys (HotKey is Copy; derive IDs via `.id()`).
 pub struct HotkeyIds {
-    pub dictation: Option<u32>,
-    pub computer_use: Option<u32>,
-    pub dict_hotkey: Option<HotKey>,
-    pub cu_hotkey: Option<HotKey>,
+    pub dictation: Option<HotKey>,
+    pub computer_use: Option<HotKey>,
+}
+
+impl HotkeyIds {
+    pub fn none() -> Self {
+        Self { dictation: None, computer_use: None }
+    }
 }
 
 /// Parse a shortcut string like "Ctrl+Super+Space" into a `HotKey`.
@@ -148,7 +152,6 @@ pub fn setup_hotkeys(cfg: &HotkeyConfig) -> Result<Option<(GlobalHotKeyManager, 
     };
 
     let manager = GlobalHotKeyManager::new().context("create hotkey manager")?;
-    let dict_id = hotkey.id();
 
     match manager.register(hotkey) {
         Ok(()) => {
@@ -165,24 +168,21 @@ pub fn setup_hotkeys(cfg: &HotkeyConfig) -> Result<Option<(GlobalHotKeyManager, 
     }
 
     // Register computer-use hotkey if configured
-    let cu_id = if let Some(ref cu_shortcut) = cfg.cu_shortcut {
+    let cu_hotkey = if let Some(ref cu_shortcut) = cfg.cu_shortcut {
         match parse_shortcut(cu_shortcut) {
-            Ok(cu_hk) => {
-                let id = cu_hk.id();
-                match manager.register(cu_hk) {
-                    Ok(()) => {
-                        log::info!("Global computer-use hotkey registered: {}", cu_shortcut);
-                        Some(id)
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to register CU hotkey {:?}: {e}. CU hotkey disabled.",
-                            cu_shortcut
-                        );
-                        None
-                    }
+            Ok(cu_hk) => match manager.register(cu_hk) {
+                Ok(()) => {
+                    log::info!("Global computer-use hotkey registered: {}", cu_shortcut);
+                    Some(cu_hk)
                 }
-            }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to register CU hotkey {:?}: {e}. CU hotkey disabled.",
+                        cu_shortcut
+                    );
+                    None
+                }
+            },
             Err(e) => {
                 log::warn!("Invalid CU hotkey {:?}: {e}. CU hotkey disabled.", cu_shortcut);
                 None
@@ -192,54 +192,31 @@ pub fn setup_hotkeys(cfg: &HotkeyConfig) -> Result<Option<(GlobalHotKeyManager, 
         None
     };
 
-    let cu_hotkey_obj = if cu_id.is_some() {
-        // Re-parse to get the HotKey object for later unregister/reregister
-        cfg.cu_shortcut.as_ref().and_then(|s| parse_shortcut(s).ok())
-    } else {
-        None
-    };
-
     Ok(Some((manager, HotkeyIds {
-        dictation: Some(dict_id),
-        computer_use: cu_id,
-        dict_hotkey: Some(hotkey),
-        cu_hotkey: cu_hotkey_obj,
+        dictation: Some(hotkey),
+        computer_use: cu_hotkey,
     })))
 }
 
 /// Unregister all active hotkeys (e.g. before opening Settings subprocess).
 pub fn unregister_hotkeys(manager: &GlobalHotKeyManager, ids: &HotkeyIds) {
-    if let Some(hk) = ids.dict_hotkey {
-        if let Err(e) = manager.unregister(hk) {
-            log::warn!("Failed to unregister dictation hotkey: {e}");
-        } else {
-            log::info!("Dictation hotkey unregistered");
-        }
-    }
-    if let Some(hk) = ids.cu_hotkey {
-        if let Err(e) = manager.unregister(hk) {
-            log::warn!("Failed to unregister CU hotkey: {e}");
-        } else {
-            log::info!("CU hotkey unregistered");
-        }
+    let hotkeys: Vec<HotKey> = [ids.dictation, ids.computer_use].into_iter().flatten().collect();
+    if hotkeys.is_empty() { return; }
+    if let Err(e) = manager.unregister_all(&hotkeys) {
+        log::warn!("Failed to unregister hotkeys: {e}");
+    } else {
+        log::info!("Hotkeys unregistered ({} total)", hotkeys.len());
     }
 }
 
 /// Re-register all hotkeys (e.g. after Settings subprocess exits).
 pub fn reregister_hotkeys(manager: &GlobalHotKeyManager, ids: &HotkeyIds) {
-    if let Some(hk) = ids.dict_hotkey {
-        if let Err(e) = manager.register(hk) {
-            log::warn!("Failed to re-register dictation hotkey: {e}");
-        } else {
-            log::info!("Dictation hotkey re-registered");
-        }
-    }
-    if let Some(hk) = ids.cu_hotkey {
-        if let Err(e) = manager.register(hk) {
-            log::warn!("Failed to re-register CU hotkey: {e}");
-        } else {
-            log::info!("CU hotkey re-registered");
-        }
+    let hotkeys: Vec<HotKey> = [ids.dictation, ids.computer_use].into_iter().flatten().collect();
+    if hotkeys.is_empty() { return; }
+    if let Err(e) = manager.register_all(&hotkeys) {
+        log::warn!("Failed to re-register hotkeys: {e}");
+    } else {
+        log::info!("Hotkeys re-registered ({} total)", hotkeys.len());
     }
 }
 
@@ -251,9 +228,9 @@ pub fn handle_hotkey_event(
     cfg: &Config,
     pipeline: Arc<Pipeline>,
 ) {
-    if Some(event.id) == ids.dictation {
+    if ids.dictation.map(|hk| hk.id()) == Some(event.id) {
         voxctrl_core::recording::toggle_recording(state, cfg, pipeline);
-    } else if Some(event.id) == ids.computer_use {
+    } else if ids.computer_use.map(|hk| hk.id()) == Some(event.id) {
         log::info!("Computer-use hotkey pressed");
         // TODO: Route to CU pipeline when connected
     }

@@ -404,7 +404,7 @@ pub struct SettingsApp {
 /// winit 0.30 forbids multiple EventLoops per process, so we can't call
 /// `eframe::run_native` from a thread while the main GUI loop is running.
 /// Instead, re-exec ourselves with `--settings`.
-pub fn open_settings(_registry: Arc<Mutex<ModelRegistry>>) -> Option<std::process::Child> {
+pub fn open_settings() -> Option<std::process::Child> {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -1512,6 +1512,18 @@ impl SettingsApp {
         });
     }
 
+    fn format_hotkey_reg_error(e: &impl std::fmt::Display, label: &str) -> String {
+        let err_str = format!("{e}");
+        if err_str.to_lowercase().contains("already regist") {
+            format!(
+                "{label} is registered by another program. Close other instances \
+                 of voxctrl or other programs that use this shortcut, then retry."
+            )
+        } else {
+            format!("Failed to register {label}: {e}")
+        }
+    }
+
     fn register_test_hotkey(&mut self) {
         self.test_hotkey = None;
         self.test_hotkey_error = None;
@@ -1538,15 +1550,7 @@ impl SettingsApp {
 
         let id = hotkey.id();
         if let Err(e) = manager.register(hotkey) {
-            let err_str = format!("{e}");
-            let msg = if err_str.to_lowercase().contains("already regist") {
-                "Hotkey is registered by another program. Close other instances \
-                 of voxctrl or other programs that use this shortcut, then retry."
-                    .to_string()
-            } else {
-                format!("Failed to register hotkey: {e}")
-            };
-            self.test_hotkey_error = Some(msg);
+            self.test_hotkey_error = Some(Self::format_hotkey_reg_error(&e, "Hotkey"));
             return;
         }
 
@@ -1579,15 +1583,7 @@ impl SettingsApp {
 
             let cu_id = cu_hotkey.id();
             if let Err(e) = cu_manager.register(cu_hotkey) {
-                let err_str = format!("{e}");
-                let msg = if err_str.to_lowercase().contains("already regist") {
-                    "CU hotkey is registered by another program. Close other instances \
-                     of voxctrl or other programs that use this shortcut, then retry."
-                        .to_string()
-                } else {
-                    format!("Failed to register CU hotkey: {e}")
-                };
-                self.test_hotkey_cu_error = Some(msg);
+                self.test_hotkey_cu_error = Some(Self::format_hotkey_reg_error(&e, "CU hotkey"));
                 return;
             }
 
