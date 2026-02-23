@@ -1372,12 +1372,27 @@ impl SettingsApp {
         self.test.stt_status = format!("Transcribing {}...", path.file_name().unwrap_or_default().to_string_lossy());
         self.test.stt_result.clear();
 
-        // Send the original WAV file directly — preserves the correct sample rate.
-        let wav_data = match std::fs::read(&path) {
-            Ok(d) => d,
+        // Read WAV with hound to extract f32 PCM samples + sample rate.
+        let reader = match hound::WavReader::open(&path) {
+            Ok(r) => r,
             Err(e) => {
                 self.test.stt_status = format!("Load error: {e}");
                 return;
+            }
+        };
+        let spec = reader.spec();
+        let sample_rate = spec.sample_rate;
+        let samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Int => {
+                reader.into_samples::<i16>()
+                    .filter_map(|s| s.ok())
+                    .map(|s| s as f32 / 32768.0)
+                    .collect()
+            }
+            hound::SampleFormat::Float => {
+                reader.into_samples::<f32>()
+                    .filter_map(|s| s.ok())
+                    .collect()
             }
         };
 
@@ -1392,7 +1407,7 @@ impl SettingsApp {
         self.test.stt_status_slot = Some(status_slot);
 
         std::thread::spawn(move || {
-            match transcribe_wav_data(&wav_data, &stt_cfg) {
+            match transcribe_pcm_via_server_or_direct(&samples, sample_rate, &stt_cfg) {
                 Ok(text) => {
                     *result_writer.lock().unwrap() = Some(text);
                     *status_writer.lock().unwrap() = Some("Done".into());
@@ -1577,7 +1592,6 @@ fn transcribe_chunks(
     sample_rate: u32,
     stt_cfg: &config::SttConfig,
 ) -> anyhow::Result<String> {
-    // Log audio stats before writing WAV
     let (cmin, cmax) = chunks.iter().fold((f32::MAX, f32::MIN), |(mn, mx), &v| (mn.min(v), mx.max(v)));
     let cmean: f64 = chunks.iter().map(|&v| v as f64).sum::<f64>() / chunks.len().max(1) as f64;
     let rms: f64 = (chunks.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / chunks.len().max(1) as f64).sqrt();
@@ -1587,57 +1601,25 @@ fn transcribe_chunks(
         cmin, cmax, cmean, rms
     );
 
-    let tmp = tempfile::Builder::new()
-        .suffix(".wav")
-        .tempfile()?;
-
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-
-    let mut writer = hound::WavWriter::create(tmp.path(), spec)?;
-    for &sample in chunks {
-        let s16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-        writer.write_sample(s16)?;
-    }
-    writer.finalize()?;
-
-    let wav_size = std::fs::metadata(tmp.path()).map(|m| m.len()).unwrap_or(0);
-    log::info!("[testbed] WAV written: {:?}, {} bytes", tmp.path(), wav_size);
-
-    let wav_data = std::fs::read(tmp.path())?;
-    transcribe_via_server_or_direct(&wav_data, stt_cfg)
-}
-
-/// Transcribe from raw WAV bytes (e.g. loaded from a file).
-fn transcribe_wav_data(
-    wav_data: &[u8],
-    stt_cfg: &config::SttConfig,
-) -> anyhow::Result<String> {
-    log::info!("[testbed] transcribe_wav_data: {} bytes", wav_data.len());
-    transcribe_via_server_or_direct(wav_data, stt_cfg)
+    transcribe_pcm_via_server_or_direct(chunks, sample_rate, stt_cfg)
 }
 
 /// Try the named-pipe STT server first; fall back to a local transcriber.
-fn transcribe_via_server_or_direct(
-    wav_data: &[u8],
+fn transcribe_pcm_via_server_or_direct(
+    samples: &[f32],
+    sample_rate: u32,
     stt_cfg: &config::SttConfig,
 ) -> anyhow::Result<String> {
     log::info!("[testbed] Trying STT via named-pipe server...");
-    match voxctrl_core::stt_client::transcribe_via_server(wav_data) {
+    match voxctrl_core::stt_client::transcribe_pcm_via_server(samples, sample_rate) {
         Ok(text) => {
             log::info!("[testbed] Server transcription OK: {:?}", text);
             Ok(text)
         }
         Err(server_err) => {
             log::warn!("[testbed] Server unavailable ({server_err:#}), trying direct transcriber...");
-            let tmp = tempfile::Builder::new().suffix(".wav").tempfile()?;
-            std::fs::write(tmp.path(), wav_data)?;
             let transcriber = voxctrl_core::stt::create_transcriber(stt_cfg, None, Some(&voxctrl_stt::stt_factory))?;
-            let result = transcriber.transcribe(tmp.path());
+            let result = transcriber.transcribe_pcm(samples, sample_rate);
             match &result {
                 Ok(text) => log::info!("[testbed] Direct transcription OK: {:?}", text),
                 Err(e) => log::error!("[testbed] Direct transcription failed: {e:#}"),

@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use anyhow::Context;
-
 use crate::config::Config;
 use crate::pipeline::Pipeline;
 use crate::{AppStatus, SharedState};
@@ -51,30 +49,11 @@ pub fn toggle_recording(
     }
 }
 
-/// Write chunks to WAV tempfile, run the pipeline.
+/// Send PCM chunks through the pipeline directly (no temp WAV).
 fn transcribe_via_pipeline(
     chunks: &[f32],
     sample_rate: u32,
     pipeline: &Pipeline,
 ) -> anyhow::Result<()> {
-    let tmp = tempfile::Builder::new()
-        .suffix(".wav")
-        .tempfile()
-        .context("create temp WAV")?;
-
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-
-    let mut writer = hound::WavWriter::create(tmp.path(), spec).context("create WAV writer")?;
-    for &sample in chunks {
-        let s16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-        writer.write_sample(s16)?;
-    }
-    writer.finalize().context("finalize WAV")?;
-
-    pipeline.process(tmp.path())
+    pipeline.process_pcm(chunks, sample_rate)
 }

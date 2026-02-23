@@ -1,7 +1,7 @@
 //! STT named-pipe server — proxies transcription requests to the pipeline's STT backend.
 //!
-//! Wire protocol (length-prefixed):
-//!   Request:  [4 bytes: WAV len u32 BE] [N bytes: WAV data]
+//! Wire protocol (PCM-based):
+//!   Request:  [4 bytes: sample_rate u32 BE] [4 bytes: num_samples u32 BE] [N*4 bytes: f32 samples LE]
 //!   Response: [1 byte: status 0=ok 1=err] [4 bytes: text len u32 BE] [N bytes: UTF-8 text]
 
 use std::io::{Read, Write};
@@ -50,31 +50,32 @@ pub fn start(pipeline: Arc<Pipeline>) -> Result<()> {
 }
 
 fn handle_connection(mut stream: impl Read + Write, pipeline: &Pipeline) -> Result<()> {
-    // Read WAV length
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf)?;
-    let wav_len = u32::from_be_bytes(len_buf);
+    let mut header = [0u8; 4];
 
-    if wav_len > MAX_PAYLOAD {
-        send_error(&mut stream, &format!("Payload too large: {wav_len} bytes"))?;
+    // Read sample rate
+    stream.read_exact(&mut header)?;
+    let sample_rate = u32::from_be_bytes(header);
+
+    // Read number of samples
+    stream.read_exact(&mut header)?;
+    let num_samples = u32::from_be_bytes(header);
+
+    let payload_bytes = num_samples.saturating_mul(4);
+    if payload_bytes > MAX_PAYLOAD {
+        send_error(&mut stream, &format!("Payload too large: {payload_bytes} bytes"))?;
         return Ok(());
     }
 
-    // Read WAV data
-    let mut wav_data = vec![0u8; wav_len as usize];
-    stream.read_exact(&mut wav_data)?;
+    // Read raw f32 PCM samples (little-endian)
+    let mut pcm_bytes = vec![0u8; payload_bytes as usize];
+    stream.read_exact(&mut pcm_bytes)?;
 
-    // Write to tempfile and transcribe
-    let result = (|| -> Result<String> {
-        let mut tmp = tempfile::Builder::new()
-            .suffix(".wav")
-            .tempfile()
-            .context("Failed to create temp WAV file")?;
-        tmp.write_all(&wav_data)?;
-        tmp.flush()?;
-        let path = tmp.path().to_path_buf();
-        pipeline.stt.transcribe(&path)
-    })();
+    let samples: Vec<f32> = pcm_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+
+    let result = pipeline.stt.transcribe_pcm(&samples, sample_rate);
 
     match result {
         Ok(text) => send_ok(&mut stream, &text),
