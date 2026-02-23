@@ -14,6 +14,8 @@ use voxctrl_core::SharedState;
 pub struct HotkeyIds {
     pub dictation: Option<u32>,
     pub computer_use: Option<u32>,
+    pub dict_hotkey: Option<HotKey>,
+    pub cu_hotkey: Option<HotKey>,
 }
 
 /// Parse a shortcut string like "Ctrl+Super+Space" into a `HotKey`.
@@ -190,7 +192,55 @@ pub fn setup_hotkeys(cfg: &HotkeyConfig) -> Result<Option<(GlobalHotKeyManager, 
         None
     };
 
-    Ok(Some((manager, HotkeyIds { dictation: Some(dict_id), computer_use: cu_id })))
+    let cu_hotkey_obj = if cu_id.is_some() {
+        // Re-parse to get the HotKey object for later unregister/reregister
+        cfg.cu_shortcut.as_ref().and_then(|s| parse_shortcut(s).ok())
+    } else {
+        None
+    };
+
+    Ok(Some((manager, HotkeyIds {
+        dictation: Some(dict_id),
+        computer_use: cu_id,
+        dict_hotkey: Some(hotkey),
+        cu_hotkey: cu_hotkey_obj,
+    })))
+}
+
+/// Unregister all active hotkeys (e.g. before opening Settings subprocess).
+pub fn unregister_hotkeys(manager: &GlobalHotKeyManager, ids: &HotkeyIds) {
+    if let Some(hk) = ids.dict_hotkey {
+        if let Err(e) = manager.unregister(hk) {
+            log::warn!("Failed to unregister dictation hotkey: {e}");
+        } else {
+            log::info!("Dictation hotkey unregistered");
+        }
+    }
+    if let Some(hk) = ids.cu_hotkey {
+        if let Err(e) = manager.unregister(hk) {
+            log::warn!("Failed to unregister CU hotkey: {e}");
+        } else {
+            log::info!("CU hotkey unregistered");
+        }
+    }
+}
+
+/// Re-register all hotkeys (e.g. after Settings subprocess exits).
+pub fn reregister_hotkeys(manager: &GlobalHotKeyManager, ids: &HotkeyIds) {
+    if let Some(hk) = ids.dict_hotkey {
+        if let Err(e) = manager.register(hk) {
+            log::warn!("Failed to re-register dictation hotkey: {e}");
+        } else {
+            log::info!("Dictation hotkey re-registered");
+        }
+    }
+    if let Some(hk) = ids.cu_hotkey {
+        if let Err(e) = manager.register(hk) {
+            log::warn!("Failed to re-register CU hotkey: {e}");
+        } else {
+            log::info!("CU hotkey re-registered");
+        }
+    }
 }
 
 /// Handle a hotkey event: toggle Idle → Recording → Transcribing.
