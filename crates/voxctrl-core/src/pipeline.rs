@@ -53,6 +53,27 @@ impl Pipeline {
         let text = self.stt.transcribe(wav_path)?;
         let stt_elapsed = start.elapsed().as_secs_f64();
 
+        self.route_and_execute(start, stt_elapsed, text)
+    }
+
+    /// Run the full pipeline from raw PCM: transcribe → route → execute.
+    pub fn process_pcm(&self, samples: &[f32], sample_rate: u32) -> anyhow::Result<()> {
+        let start = std::time::Instant::now();
+
+        // STT
+        let text = self.stt.transcribe_pcm(samples, sample_rate)?;
+        let stt_elapsed = start.elapsed().as_secs_f64();
+
+        self.route_and_execute(start, stt_elapsed, text)
+    }
+
+    /// Shared tail of the pipeline: log STT result, route, execute.
+    fn route_and_execute(
+        &self,
+        start: std::time::Instant,
+        stt_elapsed: f64,
+        text: String,
+    ) -> anyhow::Result<()> {
         if text.is_empty() {
             log::info!("STT returned empty text ({:.1}s), skipping", stt_elapsed);
             return Ok(());
