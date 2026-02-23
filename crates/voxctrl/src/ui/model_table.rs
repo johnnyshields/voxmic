@@ -1372,27 +1372,11 @@ impl SettingsApp {
         self.test.stt_status = format!("Transcribing {}...", path.file_name().unwrap_or_default().to_string_lossy());
         self.test.stt_result.clear();
 
-        // Read WAV with hound to extract f32 PCM samples + sample rate.
-        let reader = match hound::WavReader::open(&path) {
-            Ok(r) => r,
+        let (samples, sample_rate) = match voxctrl_core::stt::load_wav_pcm(&path) {
+            Ok(v) => v,
             Err(e) => {
                 self.test.stt_status = format!("Load error: {e}");
                 return;
-            }
-        };
-        let spec = reader.spec();
-        let sample_rate = spec.sample_rate;
-        let samples: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Int => {
-                reader.into_samples::<i16>()
-                    .filter_map(|s| s.ok())
-                    .map(|s| s as f32 / 32768.0)
-                    .collect()
-            }
-            hound::SampleFormat::Float => {
-                reader.into_samples::<f32>()
-                    .filter_map(|s| s.ok())
-                    .collect()
             }
         };
 

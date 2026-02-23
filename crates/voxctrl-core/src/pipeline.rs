@@ -1,6 +1,6 @@
 //! Pipeline — wires together STT → Router → Action.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::action::{ActionExecutor, ActionFactory};
 use crate::config::Config;
@@ -45,17 +45,6 @@ impl Pipeline {
         })
     }
 
-    /// Run the full pipeline: transcribe → route → execute.
-    pub fn process(&self, wav_path: &Path) -> anyhow::Result<()> {
-        let start = std::time::Instant::now();
-
-        // STT
-        let text = self.stt.transcribe(wav_path)?;
-        let stt_elapsed = start.elapsed().as_secs_f64();
-
-        self.route_and_execute(start, stt_elapsed, text)
-    }
-
     /// Run the full pipeline from raw PCM: transcribe → route → execute.
     pub fn process_pcm(&self, samples: &[f32], sample_rate: u32) -> anyhow::Result<()> {
         let start = std::time::Instant::now();
@@ -94,5 +83,146 @@ impl Pipeline {
 
         log::info!("Pipeline complete in {:.1}s", start.elapsed().as_secs_f64());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use crate::action::ActionExecutor;
+    use crate::router::{Intent, IntentRouter};
+    use crate::stt::Transcriber;
+
+    struct MockTranscriber {
+        response: String,
+    }
+    impl Transcriber for MockTranscriber {
+        fn transcribe(&self, _: &std::path::Path) -> anyhow::Result<String> {
+            Ok(self.response.clone())
+        }
+        fn transcribe_pcm(&self, _: &[f32], _: u32) -> anyhow::Result<String> {
+            Ok(self.response.clone())
+        }
+        fn name(&self) -> &str { "mock" }
+        fn is_available(&self) -> bool { true }
+    }
+
+    struct MockRouter {
+        routed: Arc<Mutex<Vec<String>>>,
+    }
+    impl IntentRouter for MockRouter {
+        fn route(&self, text: &str) -> anyhow::Result<Intent> {
+            self.routed.lock().unwrap().push(text.to_string());
+            Ok(Intent::Dictate(text.to_string()))
+        }
+        fn name(&self) -> &str { "mock" }
+    }
+
+    struct MockAction {
+        executed: Arc<Mutex<Vec<String>>>,
+    }
+    impl ActionExecutor for MockAction {
+        fn execute(&self, intent: &Intent) -> anyhow::Result<()> {
+            match intent {
+                Intent::Dictate(t) => self.executed.lock().unwrap().push(t.clone()),
+                Intent::Command { action, .. } => self.executed.lock().unwrap().push(action.clone()),
+            }
+            Ok(())
+        }
+        fn name(&self) -> &str { "mock" }
+    }
+
+    #[test]
+    fn process_pcm_chains_stt_router_action() {
+        let routed = Arc::new(Mutex::new(vec![]));
+        let executed = Arc::new(Mutex::new(vec![]));
+
+        let pipeline = Pipeline {
+            stt: Box::new(MockTranscriber { response: "hello world".into() }),
+            router: Box::new(MockRouter { routed: routed.clone() }),
+            action: Box::new(MockAction { executed: executed.clone() }),
+        };
+
+        pipeline.process_pcm(&[0.1, 0.2], 16000).unwrap();
+
+        assert_eq!(&*routed.lock().unwrap(), &["hello world"]);
+        assert_eq!(&*executed.lock().unwrap(), &["hello world"]);
+    }
+
+    #[test]
+    fn process_pcm_skips_empty_text() {
+        let routed = Arc::new(Mutex::new(vec![]));
+        let executed = Arc::new(Mutex::new(vec![]));
+
+        let pipeline = Pipeline {
+            stt: Box::new(MockTranscriber { response: "".into() }),
+            router: Box::new(MockRouter { routed: routed.clone() }),
+            action: Box::new(MockAction { executed: executed.clone() }),
+        };
+
+        pipeline.process_pcm(&[0.1], 16000).unwrap();
+
+        assert!(routed.lock().unwrap().is_empty(), "router should not be called for empty text");
+        assert!(executed.lock().unwrap().is_empty(), "action should not be called for empty text");
+    }
+
+    #[test]
+    fn process_pcm_calls_transcribe_pcm_not_transcribe() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TrackingTranscriber {
+            pcm_called: Arc<AtomicBool>,
+            file_called: Arc<AtomicBool>,
+        }
+        impl Transcriber for TrackingTranscriber {
+            fn transcribe(&self, _: &std::path::Path) -> anyhow::Result<String> {
+                self.file_called.store(true, Ordering::SeqCst);
+                Ok("from-file".into())
+            }
+            fn transcribe_pcm(&self, samples: &[f32], _: u32) -> anyhow::Result<String> {
+                self.pcm_called.store(true, Ordering::SeqCst);
+                Ok(format!("{} samples", samples.len()))
+            }
+            fn name(&self) -> &str { "tracking" }
+            fn is_available(&self) -> bool { true }
+        }
+
+        let pcm_called = Arc::new(AtomicBool::new(false));
+        let file_called = Arc::new(AtomicBool::new(false));
+        let pipeline = Pipeline {
+            stt: Box::new(TrackingTranscriber {
+                pcm_called: pcm_called.clone(),
+                file_called: file_called.clone(),
+            }),
+            router: Box::new(MockRouter { routed: Arc::new(Mutex::new(vec![])) }),
+            action: Box::new(MockAction { executed: Arc::new(Mutex::new(vec![])) }),
+        };
+
+        pipeline.process_pcm(&[0.1; 1600], 16000).unwrap();
+        assert!(pcm_called.load(Ordering::SeqCst), "transcribe_pcm should have been called");
+        assert!(!file_called.load(Ordering::SeqCst), "transcribe (file) should NOT have been called");
+    }
+
+    #[test]
+    fn process_pcm_propagates_stt_error() {
+        struct FailTranscriber;
+        impl Transcriber for FailTranscriber {
+            fn transcribe(&self, _: &std::path::Path) -> anyhow::Result<String> { anyhow::bail!("fail") }
+            fn transcribe_pcm(&self, _: &[f32], _: u32) -> anyhow::Result<String> { anyhow::bail!("stt failed") }
+            fn name(&self) -> &str { "fail" }
+            fn is_available(&self) -> bool { false }
+        }
+
+        let pipeline = Pipeline {
+            stt: Box::new(FailTranscriber),
+            router: Box::new(MockRouter { routed: Arc::new(Mutex::new(vec![])) }),
+            action: Box::new(MockAction { executed: Arc::new(Mutex::new(vec![])) }),
+        };
+
+        let result = pipeline.process_pcm(&[0.1], 16000);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("stt failed"));
     }
 }

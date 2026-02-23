@@ -7,6 +7,26 @@ use std::path::{Path, PathBuf};
 
 use crate::config::SttConfig;
 
+/// Load a WAV file and return its f32 PCM samples and sample rate.
+///
+/// Handles both 16-bit integer and 32-bit float WAV formats.
+pub fn load_wav_pcm(path: &Path) -> anyhow::Result<(Vec<f32>, u32)> {
+    let reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Int => {
+            reader.into_samples::<i16>()
+                .map(|s| s.map(|v| v as f32 / 32768.0))
+                .collect::<Result<_, _>>()?
+        }
+        hound::SampleFormat::Float => {
+            reader.into_samples::<f32>()
+                .collect::<Result<_, _>>()?
+        }
+    };
+    Ok((samples, spec.sample_rate))
+}
+
 /// Trait for speech-to-text backends.
 pub trait Transcriber: Send + Sync {
     /// Transcribe audio from a WAV file path.
@@ -178,5 +198,121 @@ mod tests {
         let t = create_transcriber(&cfg, None, Some(&*factory)).expect("should not fail fatally");
         assert_eq!(t.name(), "pending");
         assert!(!t.is_available());
+    }
+
+    // ── load_wav_pcm tests ──────────────────────────────────────────────
+
+    fn write_wav_i16(path: &Path, samples: &[i16], sample_rate: u32) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for &s in samples {
+            w.write_sample(s).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    fn write_wav_f32(path: &Path, samples: &[f32], sample_rate: u32) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for &s in samples {
+            w.write_sample(s).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    #[test]
+    fn load_wav_pcm_i16_roundtrip() {
+        let tmp = tempfile::Builder::new().suffix(".wav").tempfile().unwrap();
+        let i16_samples: Vec<i16> = vec![0, 16384, -16384, 32767, -32768];
+        write_wav_i16(tmp.path(), &i16_samples, 16000);
+
+        let (pcm, rate) = load_wav_pcm(tmp.path()).unwrap();
+        assert_eq!(rate, 16000);
+        assert_eq!(pcm.len(), i16_samples.len());
+        for (got, &orig) in pcm.iter().zip(&i16_samples) {
+            let expected = orig as f32 / 32768.0;
+            assert!((got - expected).abs() < 1e-5, "expected {expected}, got {got}");
+        }
+    }
+
+    #[test]
+    fn load_wav_pcm_f32_roundtrip() {
+        let tmp = tempfile::Builder::new().suffix(".wav").tempfile().unwrap();
+        let f32_samples = vec![0.0f32, 0.5, -0.5, 1.0, -1.0];
+        write_wav_f32(tmp.path(), &f32_samples, 44100);
+
+        let (pcm, rate) = load_wav_pcm(tmp.path()).unwrap();
+        assert_eq!(rate, 44100);
+        assert_eq!(pcm.len(), f32_samples.len());
+        for (got, &expected) in pcm.iter().zip(&f32_samples) {
+            assert!((got - expected).abs() < 1e-6, "expected {expected}, got {got}");
+        }
+    }
+
+    #[test]
+    fn load_wav_pcm_nonexistent_file_returns_error() {
+        let result = load_wav_pcm(Path::new("/tmp/nonexistent_wav_file_12345.wav"));
+        assert!(result.is_err());
+    }
+
+    // ── transcribe_pcm default round-trip ───────────────────────────────
+
+    struct MockWavTranscriber;
+
+    impl Transcriber for MockWavTranscriber {
+        fn transcribe(&self, wav_path: &Path) -> anyhow::Result<String> {
+            let (samples, rate) = load_wav_pcm(wav_path)?;
+            Ok(format!("{}@{}", samples.len(), rate))
+        }
+        fn name(&self) -> &str { "mock" }
+        fn is_available(&self) -> bool { true }
+    }
+
+    #[test]
+    fn transcribe_pcm_default_round_trip() {
+        let t = MockWavTranscriber;
+        let samples = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        let result = t.transcribe_pcm(&samples, 16000).unwrap();
+        assert_eq!(result, "5@16000");
+    }
+
+    #[test]
+    fn transcribe_pcm_default_preserves_sample_values() {
+        use std::sync::Mutex;
+
+        struct CaptureTranscriber {
+            captured: Mutex<Vec<f32>>,
+        }
+        impl Transcriber for CaptureTranscriber {
+            fn transcribe(&self, wav_path: &Path) -> anyhow::Result<String> {
+                let (samples, _) = load_wav_pcm(wav_path)?;
+                *self.captured.lock().unwrap() = samples;
+                Ok("ok".into())
+            }
+            fn name(&self) -> &str { "capture-mock" }
+            fn is_available(&self) -> bool { true }
+        }
+
+        let t = CaptureTranscriber { captured: Mutex::new(vec![]) };
+        // Use values that survive i16 quantization cleanly
+        let pcm = vec![0.0f32, 0.5, -0.5];
+        t.transcribe_pcm(&pcm, 16000).unwrap();
+
+        let captured = t.captured.lock().unwrap();
+        assert_eq!(captured.len(), pcm.len());
+        for (got, &orig) in captured.iter().zip(&pcm) {
+            // i16 quantization introduces ~1/32768 error
+            assert!((got - orig).abs() < 0.001, "expected ~{orig}, got {got}");
+        }
     }
 }

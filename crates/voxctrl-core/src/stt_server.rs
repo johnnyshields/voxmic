@@ -102,3 +102,143 @@ fn send_error(stream: &mut impl Write, msg: &str) -> Result<()> {
     stream.write_all(&buf)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    use crate::action::ActionExecutor;
+    use crate::router::{Intent, IntentRouter};
+    use crate::stt::Transcriber;
+
+    struct EchoTranscriber;
+    impl Transcriber for EchoTranscriber {
+        fn transcribe(&self, _: &std::path::Path) -> Result<String> { Ok("file".into()) }
+        fn transcribe_pcm(&self, samples: &[f32], sample_rate: u32) -> Result<String> {
+            Ok(format!("n={},sr={}", samples.len(), sample_rate))
+        }
+        fn name(&self) -> &str { "echo" }
+        fn is_available(&self) -> bool { true }
+    }
+
+    struct FailTranscriber;
+    impl Transcriber for FailTranscriber {
+        fn transcribe(&self, _: &std::path::Path) -> Result<String> { anyhow::bail!("fail") }
+        fn transcribe_pcm(&self, _: &[f32], _: u32) -> Result<String> { anyhow::bail!("stt error") }
+        fn name(&self) -> &str { "fail" }
+        fn is_available(&self) -> bool { false }
+    }
+
+    struct NoopRouter;
+    impl IntentRouter for NoopRouter {
+        fn route(&self, text: &str) -> Result<Intent> { Ok(Intent::Dictate(text.into())) }
+        fn name(&self) -> &str { "noop" }
+    }
+
+    struct NoopAction;
+    impl ActionExecutor for NoopAction {
+        fn execute(&self, _: &Intent) -> Result<()> { Ok(()) }
+        fn name(&self) -> &str { "noop" }
+    }
+
+    /// Encode a PCM request per the wire protocol.
+    fn encode_request(sample_rate: u32, samples: &[f32]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&sample_rate.to_be_bytes());
+        buf.extend_from_slice(&(samples.len() as u32).to_be_bytes());
+        for &s in samples {
+            buf.extend_from_slice(&s.to_le_bytes());
+        }
+        buf
+    }
+
+    /// Decode a response from raw bytes: returns (status, text).
+    fn decode_response(bytes: &[u8]) -> (u8, String) {
+        let status = bytes[0];
+        let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+        let text = String::from_utf8(bytes[5..5 + len].to_vec()).unwrap();
+        (status, text)
+    }
+
+    fn make_pipeline(stt: Box<dyn Transcriber>) -> Pipeline {
+        Pipeline {
+            stt,
+            router: Box::new(NoopRouter),
+            action: Box::new(NoopAction),
+        }
+    }
+
+    #[test]
+    fn wire_protocol_success() {
+        let pipeline = make_pipeline(Box::new(EchoTranscriber));
+        let samples = vec![0.1f32, 0.2, 0.3];
+        let request = encode_request(16000, &samples);
+
+        let mut stream = Cursor::new(request);
+        handle_connection(&mut stream, &pipeline).unwrap();
+
+        let data = stream.into_inner();
+        // Response starts after the request bytes (8 header + 12 PCM = 20 bytes)
+        let response = &data[20..];
+        let (status, text) = decode_response(response);
+        assert_eq!(status, 0);
+        assert_eq!(text, "n=3,sr=16000");
+    }
+
+    #[test]
+    fn wire_protocol_error() {
+        let pipeline = make_pipeline(Box::new(FailTranscriber));
+        let request = encode_request(16000, &[1.0]);
+
+        let mut stream = Cursor::new(request);
+        handle_connection(&mut stream, &pipeline).unwrap();
+
+        let data = stream.into_inner();
+        let response = &data[12..]; // 8 header + 4 PCM
+        let (status, text) = decode_response(response);
+        assert_eq!(status, 1);
+        assert!(text.contains("stt error"), "error text: {text}");
+    }
+
+    #[test]
+    fn wire_protocol_payload_too_large() {
+        // Craft a request claiming a huge number of samples, with only a small body.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&16000u32.to_be_bytes()); // sample_rate
+        let huge_count = MAX_PAYLOAD / 4 + 1;
+        buf.extend_from_slice(&huge_count.to_be_bytes()); // num_samples
+        // Provide enough trailing bytes that the stream doesn't EOF before the error response.
+        // handle_connection sends the error before trying to read PCM.
+        // Actually, it checks payload size before reading, so we just need the header.
+        // Pad with enough zeros for the write to land correctly.
+        buf.resize(buf.len() + 256, 0);
+
+        let mut stream = Cursor::new(buf);
+        handle_connection(&mut stream, &make_pipeline(Box::new(EchoTranscriber))).unwrap();
+
+        let data = stream.into_inner();
+        // Response starts after the 8-byte header we consumed
+        let response = &data[8..];
+        // Find the response: first byte after header area should be status=1 (error)
+        // The cursor position after reading 8 bytes is at offset 8, writes go there
+        let (status, text) = decode_response(response);
+        assert_eq!(status, 1);
+        assert!(text.contains("too large"), "error text: {text}");
+    }
+
+    #[test]
+    fn wire_protocol_empty_samples() {
+        let pipeline = make_pipeline(Box::new(EchoTranscriber));
+        let request = encode_request(44100, &[]);
+
+        let mut stream = Cursor::new(request);
+        handle_connection(&mut stream, &pipeline).unwrap();
+
+        let data = stream.into_inner();
+        let response = &data[8..]; // 8 header + 0 PCM
+        let (status, text) = decode_response(response);
+        assert_eq!(status, 0);
+        assert_eq!(text, "n=0,sr=44100");
+    }
+}

@@ -301,23 +301,8 @@ fn load_mel_filters(num_mel_bins: usize) -> anyhow::Result<Vec<f32>> {
 
 impl Transcriber for WhisperNativeTranscriber {
     fn transcribe(&self, wav_path: &Path) -> anyhow::Result<String> {
-        // ── Load WAV → extract f32 PCM + sample_rate ────────────────
-        let reader = hound::WavReader::open(wav_path)?;
-        let spec = reader.spec();
-        log::debug!(
-            "[whisper-dbg] WAV: {:?}, channels={}, sample_rate={}, bits={}, format={:?}",
-            wav_path, spec.channels, spec.sample_rate, spec.bits_per_sample, spec.sample_format
-        );
-        let samples: Vec<f32> = if spec.bits_per_sample == 16 {
-            reader
-                .into_samples::<i16>()
-                .map(|s| s.map(|v| v as f32 / 32768.0))
-                .collect::<Result<_, _>>()?
-        } else {
-            reader.into_samples::<f32>().collect::<Result<_, _>>()?
-        };
-
-        self.run_inference(&samples, spec.sample_rate)
+        let (samples, sample_rate) = voxctrl_core::stt::load_wav_pcm(wav_path)?;
+        self.run_inference(&samples, sample_rate)
     }
 
     fn transcribe_pcm(&self, samples: &[f32], sample_rate: u32) -> anyhow::Result<String> {

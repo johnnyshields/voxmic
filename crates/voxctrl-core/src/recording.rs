@@ -35,7 +35,7 @@ pub fn toggle_recording(
             std::thread::Builder::new()
                 .name("transcription".into())
                 .spawn(move || {
-                    if let Err(e) = transcribe_via_pipeline(&chunks, sample_rate, &pipeline) {
+                    if let Err(e) = pipeline.process_pcm(&chunks, sample_rate) {
                         log::error!("Pipeline error: {e}");
                     }
                     *state_clone.status.lock().unwrap() = AppStatus::Idle;
@@ -49,11 +49,3 @@ pub fn toggle_recording(
     }
 }
 
-/// Send PCM chunks through the pipeline directly (no temp WAV).
-fn transcribe_via_pipeline(
-    chunks: &[f32],
-    sample_rate: u32,
-    pipeline: &Pipeline,
-) -> anyhow::Result<()> {
-    pipeline.process_pcm(chunks, sample_rate)
-}

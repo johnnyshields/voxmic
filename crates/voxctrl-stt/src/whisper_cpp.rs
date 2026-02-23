@@ -14,6 +14,41 @@ pub struct WhisperCppTranscriber {
 }
 
 impl WhisperCppTranscriber {
+    /// Run whisper.cpp inference on raw f32 PCM samples.
+    fn run_inference(&self, samples: &[f32]) -> anyhow::Result<String> {
+        let mut state = self
+            .ctx
+            .create_state()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        if let Some(lang) = &self.language {
+            params.set_language(Some(lang));
+        }
+        params.set_print_progress(false);
+        params.set_print_special(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+
+        state
+            .full(params, samples)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let n = state
+            .full_n_segments()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut text = String::new();
+        for i in 0..n {
+            let seg = state
+                .full_get_segment_text(i)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            text.push_str(&seg);
+        }
+        let text = text.trim().to_string();
+        log::debug!("WhisperCpp transcription: {text:?}");
+        Ok(text)
+    }
+
     pub fn new(cfg: &SttConfig) -> anyhow::Result<Self> {
         let model_path = resolve_model_path(&cfg.whisper_model)?;
         log::info!(
@@ -72,49 +107,12 @@ fn resolve_model_path(model: &str) -> anyhow::Result<PathBuf> {
 
 impl Transcriber for WhisperCppTranscriber {
     fn transcribe(&self, wav_path: &Path) -> anyhow::Result<String> {
-        // Load WAV as f32 PCM.
-        let reader = hound::WavReader::open(wav_path)?;
-        let spec = reader.spec();
-        let samples: Vec<f32> = if spec.bits_per_sample == 16 {
-            reader
-                .into_samples::<i16>()
-                .map(|s| s.map(|v| v as f32 / 32768.0))
-                .collect::<Result<_, _>>()?
-        } else {
-            reader.into_samples::<f32>().collect::<Result<_, _>>()?
-        };
+        let (samples, _sample_rate) = voxctrl_core::stt::load_wav_pcm(wav_path)?;
+        self.run_inference(&samples)
+    }
 
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        if let Some(lang) = &self.language {
-            params.set_language(Some(lang));
-        }
-        params.set_print_progress(false);
-        params.set_print_special(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-
-        state
-            .full(params, &samples)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        let n = state
-            .full_n_segments()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut text = String::new();
-        for i in 0..n {
-            let seg = state
-                .full_get_segment_text(i)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            text.push_str(&seg);
-        }
-        let text = text.trim().to_string();
-        log::debug!("WhisperCpp transcription: {text:?}");
-        Ok(text)
+    fn transcribe_pcm(&self, samples: &[f32], _sample_rate: u32) -> anyhow::Result<String> {
+        self.run_inference(samples)
     }
 
     fn name(&self) -> &str {
