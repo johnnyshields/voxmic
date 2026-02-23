@@ -99,23 +99,33 @@ pub fn all_models() -> Vec<ModelInfo> {
     ]
 }
 
-/// Determine which model ID is required by the current config.
-pub fn required_model_id(cfg: &Config) -> Option<String> {
-    match cfg.stt.backend.as_str() {
-        "whisper-native" | "whisper-cpp" => {
-            let model = cfg.stt.whisper_model.as_str();
-            match model {
-                "tiny" => Some("openai/whisper-tiny".into()),
-                "small" => Some("openai/whisper-small".into()),
-                "medium" => Some("openai/whisper-medium".into()),
-                "large-v3" | "large" => Some("openai/whisper-large-v3".into()),
-                _ => {
-                    log::warn!("Unknown whisper model '{model}', no catalog entry");
-                    None
-                }
+/// Map an STT backend + whisper model size to the catalog model ID.
+pub fn required_stt_model_id(backend: &str, whisper_model: &str) -> Option<String> {
+    match backend {
+        "whisper-native" | "whisper-cpp" => match whisper_model {
+            "tiny" => Some("openai/whisper-tiny".into()),
+            "small" => Some("openai/whisper-small".into()),
+            "medium" => Some("openai/whisper-medium".into()),
+            "large-v3" | "large" => Some("openai/whisper-large-v3".into()),
+            _ => {
+                log::warn!("Unknown whisper model '{whisper_model}', no catalog entry");
+                None
             }
-        }
+        },
         "voxtral-native" => Some("mistral/voxtral-mini".into()),
-        _ => None,  // HTTP backends don't need local models
+        _ => None, // HTTP backends don't need local models
     }
+}
+
+/// Map a VAD backend to the catalog model ID.
+pub fn required_vad_model_id(vad_backend: &str) -> Option<String> {
+    match vad_backend {
+        "silero" => Some("silero/vad-v5".into()),
+        _ => None,
+    }
+}
+
+/// Determine which STT model ID is required by the current config.
+pub fn required_model_id(cfg: &Config) -> Option<String> {
+    required_stt_model_id(&cfg.stt.backend, &cfg.stt.whisper_model)
 }

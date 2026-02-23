@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use muda::{Menu, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-use crate::AppStatus;
+use voxctrl_core::AppStatus;
 
 /// Menu item IDs returned by `build_tray()` for event matching in the event loop.
 pub struct TrayMenuIds {

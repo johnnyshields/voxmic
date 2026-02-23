@@ -3,7 +3,6 @@ pub mod cache_scanner;
 pub mod consent;
 pub mod downloader;
 
-#[cfg(feature = "gui")]
 pub use catalog::ModelCategory;
 pub use catalog::ModelInfo;
 

@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 
-use crate::config::{Config, HotkeyConfig};
-use crate::pipeline::Pipeline;
-use crate::SharedState;
+use voxctrl_core::config::{Config, HotkeyConfig};
+use voxctrl_core::pipeline::Pipeline;
+use voxctrl_core::SharedState;
 
 /// Parse a shortcut string like "Ctrl+Super+Space" into a `HotKey`.
 pub fn parse_shortcut(s: &str) -> Result<HotKey> {
@@ -170,7 +170,7 @@ pub fn handle_hotkey_event(
         return;
     }
 
-    crate::recording::toggle_recording(state, cfg, pipeline);
+    voxctrl_core::recording::toggle_recording(state, cfg, pipeline);
 }
 
 #[cfg(test)]

@@ -5,56 +5,29 @@
 //! GUI mode: Tray icon + global hotkey (default).
 //! TUI mode: Terminal UI with Space to toggle (`--tui`).
 
-mod action;
-mod audio;
-mod config;
 #[cfg(feature = "gui")]
 mod hotkey;
-mod models;
-mod pipeline;
-mod recording;
-mod router;
-mod stt;
-mod stt_client;
-mod stt_server;
 #[cfg(feature = "gui")]
 mod tray;
 #[cfg(feature = "tui")]
 mod tui;
 #[cfg(feature = "gui")]
 mod ui;
-mod vad;
 
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
+use voxctrl_core::SharedState;
+use voxctrl_core::config;
+use voxctrl_core::models;
+use voxctrl_core::pipeline;
+use voxctrl_core::audio;
+use voxctrl_core::stt_server;
+
 // Compile-time check: at least one UI feature must be enabled.
 #[cfg(not(any(feature = "gui", feature = "tui")))]
 compile_error!("At least one of the `gui` or `tui` features must be enabled.");
-
-// ── Shared state ───────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppStatus {
-    Idle,
-    Recording,
-    Transcribing,
-}
-
-pub struct SharedState {
-    pub status: Mutex<AppStatus>,
-    pub chunks: Mutex<Vec<f32>>,
-}
-
-impl SharedState {
-    pub fn new() -> Self {
-        Self {
-            status: Mutex::new(AppStatus::Idle),
-            chunks: Mutex::new(Vec::new()),
-        }
-    }
-}
 
 // ── UI mode selection ─────────────────────────────────────────────────────
 
@@ -289,7 +262,11 @@ fn run() -> Result<()> {
     let state = Arc::new(SharedState::new());
 
     log::info!("Creating pipeline...");
-    let pipeline = Arc::new(pipeline::Pipeline::from_config(&cfg, stt_model_dir)?);
+    let pipeline = Arc::new(pipeline::Pipeline::from_config(
+        &cfg,
+        stt_model_dir,
+        Some(&voxctrl_stt::stt_factory),
+    )?);
     log::info!("Pipeline created");
 
     log::info!("Starting audio capture...");

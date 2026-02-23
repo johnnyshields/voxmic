@@ -8247,36 +8247,64 @@ name = "voxctrl"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "burn",
- "candle-core 0.8.4",
- "candle-nn",
- "candle-transformers",
  "cpal",
  "crossterm",
  "dirs 5.0.1",
  "eframe",
  "egui",
  "egui_extras",
- "enigo",
  "env_logger",
  "global-hotkey",
- "hf-hub 0.3.2",
+ "hound",
+ "log",
+ "muda",
+ "ratatui",
+ "rfd",
+ "tempfile",
+ "tray-icon",
+ "ureq 2.12.1",
+ "voxctrl-core",
+ "voxctrl-stt",
+ "winit",
+]
+
+[[package]]
+name = "voxctrl-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "cpal",
+ "dirs 5.0.1",
+ "enigo",
+ "env_logger",
  "hound",
  "interprocess",
  "log",
- "muda",
  "ort",
- "ratatui",
  "rfd",
  "serde",
  "serde_json",
  "tempfile",
- "tokenizers 0.20.4",
- "tray-icon",
  "ureq 2.12.1",
+]
+
+[[package]]
+name = "voxctrl-stt"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "burn",
+ "candle-core 0.8.4",
+ "candle-nn",
+ "candle-transformers",
+ "hf-hub 0.3.2",
+ "hound",
+ "log",
+ "serde_json",
+ "tokenizers 0.20.4",
+ "voxctrl-core",
  "voxtral-mini-realtime",
  "whisper-rs",
- "winit",
 ]
 
 [[package]]

@@ -10,9 +10,9 @@ use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::config::Config;
-use crate::pipeline::Pipeline;
-use crate::{AppStatus, SharedState};
+use voxctrl_core::config::Config;
+use voxctrl_core::pipeline::Pipeline;
+use voxctrl_core::{AppStatus, SharedState};
 
 pub fn run_tui(
     state: Arc<SharedState>,
@@ -82,7 +82,7 @@ pub fn run_tui(
                     (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break,
                     (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => break,
                     (KeyCode::Char(' '), _) => {
-                        crate::recording::toggle_recording(&state, &cfg, pipeline.clone());
+                        voxctrl_core::recording::toggle_recording(&state, &cfg, pipeline.clone());
                     }
                     (_, _) => {}
                 }

@@ -19,7 +19,7 @@ use voxtral_mini_realtime::models::time_embedding::TimeEmbedding;
 use voxtral_mini_realtime::models::voxtral::VoxtralModel;
 use voxtral_mini_realtime::tokenizer::VoxtralTokenizer;
 
-use super::Transcriber;
+use voxctrl_core::stt::Transcriber;
 
 type Backend = Wgpu;
 

@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-use super::Transcriber;
-use crate::config::SttConfig;
+use voxctrl_core::stt::Transcriber;
+use voxctrl_core::config::SttConfig;
 
 /// Transcribes audio using the whisper.cpp library (via whisper-rs bindings).
 pub struct WhisperCppTranscriber {

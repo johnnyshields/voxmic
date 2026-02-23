@@ -45,7 +45,13 @@ impl IntentRouter for LlmRouter {
             .as_str()
             .unwrap_or("");
 
-        let parsed: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
+        let parsed: serde_json::Value = match serde_json::from_str(content) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("LLM router: failed to parse response as JSON: {e} — raw content: {content:?}");
+                serde_json::Value::default()
+            }
+        };
 
         match parsed["intent"].as_str() {
             Some("command") => Ok(Intent::Command {

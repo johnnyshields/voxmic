@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
-use crate::config;
-use crate::models::{DownloadStatus, ModelCategory, ModelRegistry};
-use crate::models::catalog::ModelInfo;
+use voxctrl_core::config;
+use voxctrl_core::models::{DownloadStatus, ModelCategory, ModelRegistry};
+use voxctrl_core::models::catalog::ModelInfo;
 
 // ── Option tables for combo boxes ─────────────────────────────────────────
 
@@ -257,10 +257,10 @@ pub fn open_settings(_registry: Arc<Mutex<ModelRegistry>>) {
 pub fn run_settings_standalone() -> anyhow::Result<()> {
     let cfg = config::load_config();
 
-    let mut registry = crate::models::ModelRegistry::new(crate::models::catalog::all_models());
+    let mut registry = voxctrl_core::models::ModelRegistry::new(voxctrl_core::models::catalog::all_models());
     registry.scan_cache(&cfg.models);
 
-    if let Some(model_id) = crate::models::catalog::required_model_id(&cfg) {
+    if let Some(model_id) = voxctrl_core::models::catalog::required_model_id(&cfg) {
         registry.set_in_use(&model_id);
     }
 
@@ -278,7 +278,7 @@ pub fn run_settings_standalone() -> anyhow::Result<()> {
         prev_tab: Tab::Settings,
         model_tab: ModelCategory::Stt,
         test: TestState::default(),
-        available_devices: crate::audio::list_input_devices(),
+        available_devices: voxctrl_core::audio::list_input_devices(),
         selected_device: cfg.audio.device_pattern.clone(),
         hotkey_shortcut: cfg.hotkey.shortcut.clone(),
         stt_backend: cfg.stt.backend.clone(),
@@ -595,24 +595,11 @@ impl SettingsApp {
     }
 
     fn required_stt_model_id(&self) -> Option<String> {
-        match self.stt_backend.as_str() {
-            "whisper-native" | "whisper-cpp" => match self.whisper_model.as_str() {
-                "tiny" => Some("openai/whisper-tiny".into()),
-                "small" => Some("openai/whisper-small".into()),
-                "medium" => Some("openai/whisper-medium".into()),
-                "large-v3" | "large" => Some("openai/whisper-large-v3".into()),
-                _ => None,
-            },
-            "voxtral-native" => Some("mistral/voxtral-mini".into()),
-            _ => None,
-        }
+        voxctrl_core::models::catalog::required_stt_model_id(&self.stt_backend, &self.whisper_model)
     }
 
     fn required_vad_model_id(&self) -> Option<String> {
-        match self.vad_backend.as_str() {
-            "silero" => Some("silero/vad-v5".into()),
-            _ => None,
-        }
+        voxctrl_core::models::catalog::required_vad_model_id(&self.vad_backend)
     }
 
     fn is_model_downloaded(&self, model_id: &str) -> bool {
@@ -865,7 +852,7 @@ impl SettingsApp {
 
     fn start_mic_test(&mut self, cfg: &config::Config) {
         let (tx, rx) = std::sync::mpsc::channel();
-        match crate::audio::start_test_capture(
+        match voxctrl_core::audio::start_test_capture(
             &cfg.audio.device_pattern,
             cfg.audio.sample_rate,
             tx,
@@ -1001,11 +988,11 @@ fn transcribe_chunks(
     // All other backends route through the main app's named-pipe STT server,
     // which owns the pipeline and loaded models.
     if stt_cfg.backend.contains("-http") {
-        let transcriber = crate::stt::create_transcriber(stt_cfg, None)?;
+        let transcriber = voxctrl_core::stt::create_transcriber(stt_cfg, None, None)?;
         transcriber.transcribe(tmp.path())
     } else {
         let wav_data = std::fs::read(tmp.path())?;
-        crate::stt_client::transcribe_via_server(&wav_data)
+        voxctrl_core::stt_client::transcribe_via_server(&wav_data)
     }
 }
 
@@ -1161,7 +1148,7 @@ impl SettingsApp {
         ui.separator();
         let dir_label = match &self.models_directory {
             Some(p) => format!("Models Directory: {}", p.display()),
-            None => match crate::models::cache_scanner::hf_cache_dir() {
+            None => match voxctrl_core::models::cache_scanner::hf_cache_dir() {
                 Some(cache_dir) => format!("Models Directory: {}", cache_dir.display()),
                 None => "Models Directory: (unknown)".into(),
             },
@@ -1299,7 +1286,7 @@ fn download_model_files(
 
     let token = hf_token();
 
-    let cache_dir = crate::models::cache_scanner::effective_cache_dir()
+    let cache_dir = voxctrl_core::models::cache_scanner::effective_cache_dir()
         .ok_or_else(|| anyhow::anyhow!("Cannot determine HF cache directory"))?;
 
     // HF Hub cache layout: models--{org}--{name}/snapshots/main/
@@ -1388,7 +1375,7 @@ fn do_delete(model_id: &str, registry: &Arc<Mutex<ModelRegistry>>) {
         }
     };
 
-    let cache_dir = match crate::models::cache_scanner::effective_cache_dir() {
+    let cache_dir = match voxctrl_core::models::cache_scanner::effective_cache_dir() {
         Some(d) => d,
         None => {
             log::error!("Cannot determine HF cache directory");
