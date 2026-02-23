@@ -4,6 +4,10 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use uiautomation::UIElement;
+use uiautomation::patterns::{
+    UIExpandCollapsePattern, UIInvokePattern, UIScrollPattern,
+    UISelectionItemPattern, UITogglePattern, UIValuePattern,
+};
 
 use voxctrl_cu::actions::{ScrollDirection, UiAction, UiActionResult};
 
@@ -16,7 +20,7 @@ pub fn execute_action(
         UiAction::Click { element_id } => {
             let elem = lookup(element_map, element_id.index)?;
             // Try InvokePattern first, fall back to click().
-            if let Ok(invoke) = elem.get_invoke_pattern() {
+            if let Ok(invoke) = elem.get_pattern::<UIInvokePattern>() {
                 invoke.invoke().context("InvokePattern::invoke()")?;
             } else {
                 elem.click().context("UIElement::click()")?;
@@ -27,7 +31,7 @@ pub fn execute_action(
         UiAction::SetValue { element_id, value } => {
             let elem = lookup(element_map, element_id.index)?;
             let pattern = elem
-                .get_value_pattern()
+                .get_pattern::<UIValuePattern>()
                 .context("element does not support ValuePattern")?;
             pattern
                 .set_value(value)
@@ -41,7 +45,7 @@ pub fn execute_action(
         UiAction::Toggle { element_id } => {
             let elem = lookup(element_map, element_id.index)?;
             let pattern = elem
-                .get_toggle_pattern()
+                .get_pattern::<UITogglePattern>()
                 .context("element does not support TogglePattern")?;
             pattern.toggle().context("TogglePattern::toggle()")?;
             Ok(UiActionResult::ok(format!("Toggled element #{}", element_id.index)))
@@ -56,7 +60,7 @@ pub fn execute_action(
         UiAction::Expand { element_id } => {
             let elem = lookup(element_map, element_id.index)?;
             let pattern = elem
-                .get_expand_collapse_pattern()
+                .get_pattern::<UIExpandCollapsePattern>()
                 .context("element does not support ExpandCollapsePattern")?;
             pattern.expand().context("ExpandCollapsePattern::expand()")?;
             Ok(UiActionResult::ok(format!("Expanded element #{}", element_id.index)))
@@ -65,7 +69,7 @@ pub fn execute_action(
         UiAction::Collapse { element_id } => {
             let elem = lookup(element_map, element_id.index)?;
             let pattern = elem
-                .get_expand_collapse_pattern()
+                .get_pattern::<UIExpandCollapsePattern>()
                 .context("element does not support ExpandCollapsePattern")?;
             pattern
                 .collapse()
@@ -79,7 +83,7 @@ pub fn execute_action(
         UiAction::Select { element_id } => {
             let elem = lookup(element_map, element_id.index)?;
             let pattern = elem
-                .get_selection_item_pattern()
+                .get_pattern::<UISelectionItemPattern>()
                 .context("element does not support SelectionItemPattern")?;
             pattern.select().context("SelectionItemPattern::select()")?;
             Ok(UiActionResult::ok(format!("Selected element #{}", element_id.index)))
@@ -100,7 +104,7 @@ pub fn execute_action(
         } => {
             let elem = lookup(element_map, element_id.index)?;
             let pattern = elem
-                .get_scroll_pattern()
+                .get_pattern::<UIScrollPattern>()
                 .context("element does not support ScrollPattern")?;
 
             for i in 0..*amount {

@@ -68,7 +68,11 @@ impl AccessibilityProvider for WindowsUiaProvider {
             match walker.get_parent(&current) {
                 Ok(parent) => {
                     // The desktop root has no name and HWND 0 — stop there.
-                    if parent == uia.get_root_element().unwrap_or(parent.clone()) {
+                    let parent_rid = parent.get_runtime_id().unwrap_or_default();
+                    let root_rid = uia.get_root_element().ok()
+                        .and_then(|r| r.get_runtime_id().ok())
+                        .unwrap_or_default();
+                    if parent_rid == root_rid {
                         break;
                     }
                     current = parent;

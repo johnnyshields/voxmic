@@ -133,13 +133,13 @@ fn parse_key_code(token: &str) -> Result<Code> {
 
 /// Register the configured hotkey, returning `None` if registration fails.
 pub fn setup_hotkeys(cfg: &HotkeyConfig) -> Result<Option<(GlobalHotKeyManager, HotkeyIds)>> {
-    let hotkey = match parse_shortcut(&cfg.shortcut) {
+    let hotkey = match parse_shortcut(&cfg.dict_shortcut) {
         Ok(h) => h,
         Err(e) => {
             log::warn!(
                 "Invalid hotkey {:?}: {e}. Continuing without hotkey — \
                  set a valid hotkey in Settings.",
-                cfg.shortcut
+                cfg.dict_shortcut
             );
             return Ok(None);
         }
@@ -150,13 +150,13 @@ pub fn setup_hotkeys(cfg: &HotkeyConfig) -> Result<Option<(GlobalHotKeyManager, 
 
     match manager.register(hotkey) {
         Ok(()) => {
-            log::info!("Global dictation hotkey registered: {}", cfg.shortcut);
+            log::info!("Global dictation hotkey registered: {}", cfg.dict_shortcut);
         }
         Err(e) => {
             log::warn!(
                 "Failed to register hotkey {:?}: {e}. Continuing without hotkey — \
-                 use the tray menu or change hotkey.shortcut in config.json.",
-                cfg.shortcut
+                 use the tray menu or change hotkey.dict_shortcut in config.json.",
+                cfg.dict_shortcut
             );
             return Ok(None);
         }

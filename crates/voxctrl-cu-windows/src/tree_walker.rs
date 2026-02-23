@@ -2,11 +2,10 @@
 
 use std::collections::HashMap;
 
-use uiautomation::types::TreeScope;
 use uiautomation::UIAutomation;
 use uiautomation::UIElement;
 
-use voxctrl_cu::tree::{ElementId, UiNode, UiRect, UiRole, UiState};
+use voxctrl_cu::tree::{ElementId, UiNode, UiRect, UiState};
 
 use crate::roles::control_type_to_role;
 
@@ -31,7 +30,7 @@ pub fn walk_element(
     element_map.insert(index, element.clone());
 
     let name = element.get_name().unwrap_or_default();
-    let control_type = element.get_control_type().unwrap_or(0);
+    let control_type = element.get_control_type().ok().map(|ct| ct as i32).unwrap_or(0);
     let role = control_type_to_role(control_type);
 
     // Platform handle: use runtime ID as string.
@@ -141,17 +140,17 @@ fn get_element_value(element: &UIElement) -> Option<String> {
 fn get_element_states(element: &UIElement) -> Vec<UiState> {
     let mut states = Vec::new();
 
-    if element.get_is_enabled().unwrap_or(true) {
+    if element.is_enabled().unwrap_or(true) {
         states.push(UiState::Enabled);
     } else {
         states.push(UiState::Disabled);
     }
 
-    if element.get_has_keyboard_focus().unwrap_or(false) {
+    if element.has_keyboard_focus().unwrap_or(false) {
         states.push(UiState::Focused);
     }
 
-    if element.get_is_offscreen().unwrap_or(false) {
+    if element.is_offscreen().unwrap_or(false) {
         states.push(UiState::Offscreen);
     }
 
@@ -240,7 +239,7 @@ fn get_available_actions(element: &UIElement) -> Vec<String> {
     }
 
     // Focus is always available for focusable elements.
-    if element.get_is_keyboard_focusable().unwrap_or(false) {
+    if element.is_keyboard_focusable().unwrap_or(false) {
         actions.push("focus".into());
     }
 
