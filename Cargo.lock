@@ -8424,6 +8424,7 @@ dependencies = [
 [[package]]
 name = "voxtral-mini-realtime"
 version = "0.2.0"
+source = "git+https://github.com/johnnyshields/voxtral-mini-realtime-rs#11f093d748eaeed5c29fa8668d3da10143a5cf07"
 dependencies = [
  "anyhow",
  "audioadapter-buffers",
