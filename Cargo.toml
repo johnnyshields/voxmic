@@ -9,3 +9,6 @@ members = [
     "crates/voxctrl-cu-linux",
     "crates/voxctrl",
 ]
+
+[patch."https://github.com/TrevorS/voxtral-mini-realtime-rs"]
+voxtral-mini-realtime = { path = "patches/voxtral-mini-realtime" }

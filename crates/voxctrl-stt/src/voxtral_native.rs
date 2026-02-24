@@ -8,7 +8,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use burn::backend::Wgpu;
 use burn::prelude::{Device, Tensor};
 use burn::tensor::TensorData;
 use voxtral_mini_realtime::audio::{load_wav, resample_to_16k, MelConfig, MelSpectrogram};
@@ -21,7 +20,7 @@ use voxtral_mini_realtime::tokenizer::VoxtralTokenizer;
 
 use voxctrl_core::stt::Transcriber;
 
-type Backend = Wgpu;
+type Backend = burn::backend::NdArray;
 
 /// Decoder model dimension (d_model for Voxtral Mini 4B).
 const DECODER_DIM: usize = 3072;

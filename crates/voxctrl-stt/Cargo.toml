@@ -38,7 +38,7 @@ audioadapter-buffers = { version = "2", optional = true }
 
 # STT: voxtral-native (optional) — pure Rust Voxtral via Burn ML framework
 voxtral-mini-realtime = { git = "https://github.com/TrevorS/voxtral-mini-realtime-rs", default-features = false, features = ["hub", "native-tokenizer", "wgpu"], optional = true }
-burn = { version = "0.20", default-features = false, features = ["wgpu"], optional = true }
+burn = { version = "0.20", default-features = false, features = ["wgpu", "ndarray"], optional = true }
 
 [dev-dependencies]
 env_logger = "0.11"
