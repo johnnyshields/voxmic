@@ -40,7 +40,7 @@ pub fn all_models() -> Vec<ModelInfo> {
     vec![
         ModelInfo {
             id: "openai/whisper-tiny".into(),
-            display_name: "Whisper Tiny".into(),
+            display_name: "openai/whisper-tiny".into(),
             backend: ModelBackend::Voxtral,
             category: ModelCategory::Stt,
             hf_repo: Some("openai/whisper-tiny".into()),
@@ -49,7 +49,7 @@ pub fn all_models() -> Vec<ModelInfo> {
         },
         ModelInfo {
             id: "openai/whisper-small".into(),
-            display_name: "Whisper Small".into(),
+            display_name: "openai/whisper-small".into(),
             backend: ModelBackend::Voxtral,
             category: ModelCategory::Stt,
             hf_repo: Some("openai/whisper-small".into()),
@@ -58,7 +58,7 @@ pub fn all_models() -> Vec<ModelInfo> {
         },
         ModelInfo {
             id: "openai/whisper-medium".into(),
-            display_name: "Whisper Medium".into(),
+            display_name: "openai/whisper-medium".into(),
             backend: ModelBackend::Voxtral,
             category: ModelCategory::Stt,
             hf_repo: Some("openai/whisper-medium".into()),
@@ -67,7 +67,7 @@ pub fn all_models() -> Vec<ModelInfo> {
         },
         ModelInfo {
             id: "openai/whisper-large-v3".into(),
-            display_name: "Whisper Large v3".into(),
+            display_name: "openai/whisper-large-v3".into(),
             backend: ModelBackend::Voxtral,
             category: ModelCategory::Stt,
             hf_repo: Some("openai/whisper-large-v3".into()),
@@ -76,22 +76,20 @@ pub fn all_models() -> Vec<ModelInfo> {
         },
         ModelInfo {
             id: "mistral/voxtral-mini".into(),
-            display_name: "Voxtral Mini 4B".into(),
+            display_name: "mistralai/Voxtral-Mini-4B-Realtime-2602".into(),
             backend: ModelBackend::Voxtral,
             category: ModelCategory::Stt,
             hf_repo: Some("mistralai/Voxtral-Mini-4B-Realtime-2602".into()),
             hf_files: vec![
-                "config.json".into(),
                 "consolidated.safetensors".into(),
                 "params.json".into(),
-                "preprocessor_config.json".into(),
                 "tekken.json".into(),
             ],
             approx_size_bytes: 9_400 * MB,
         },
         ModelInfo {
             id: "silero/vad-v5".into(),
-            display_name: "Silero VAD v5".into(),
+            display_name: "onnx-community/silero-vad".into(),
             backend: ModelBackend::Voxtral,
             category: ModelCategory::Vad,
             hf_repo: Some("onnx-community/silero-vad".into()),
